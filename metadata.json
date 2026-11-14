@@ -1,0 +1,6 @@
+{
+  "name": "FicheStudio",
+  "description": "Générateur de fiches de révision 14x19 cm prêtes à imprimer sur A4 paysage à partir de vos cours scannés en PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
