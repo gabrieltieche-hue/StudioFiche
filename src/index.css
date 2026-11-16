@@ -12,8 +12,19 @@
     font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
   }
 
-  .font-fiche {
+  .font-fiche,
+  .font-fiche-2nde {
+    font-family: 'DM Sans', 'Plus Jakarta Sans', system-ui, sans-serif;
+  }
+
+  .font-fiche-3eb {
     font-family: 'Nunito', 'DM Sans', system-ui, sans-serif;
+  }
+
+  .fiche-3eb-title-outline {
+    color: #e2e8f0;
+    -webkit-text-stroke: 1.15px #0f172a;
+    paint-order: stroke fill;
   }
 
   .font-mono-tabular {

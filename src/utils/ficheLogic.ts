@@ -1,5 +1,6 @@
 import type {
   DiagramEdge,
+  DiagramGroup,
   DiagramNode,
   FicheCard,
   FicheDeck,
@@ -15,8 +16,8 @@ export const SUBJECT_PALETTES: Record<SubjectKey, SubjectPalette> = {
     key: 'SVT',
     label: 'SVT',
     headerDisplay: 'SCIENCES DE LA VIE ET DE LA TERRE',
-    backgroundHex: '#F4CED6',
-    gridLineHex: '#E0B2BD',
+    backgroundHex: '#F3CBD5',
+    gridLineHex: '#DFB0BC',
     sectionBlueHex: '#1D4ED8',
     accentRedHex: '#DC2626',
   },
@@ -24,8 +25,8 @@ export const SUBJECT_PALETTES: Record<SubjectKey, SubjectPalette> = {
     key: 'Physique-Chimie',
     label: 'Physique-Chimie',
     headerDisplay: 'PHYSIQUE-CHIMIE',
-    backgroundHex: '#CFEBD7',
-    gridLineHex: '#B3D6BE',
+    backgroundHex: '#CBEAD4',
+    gridLineHex: '#AFD4BA',
     sectionBlueHex: '#1D4ED8',
     accentRedHex: '#DC2626',
   },
@@ -33,7 +34,7 @@ export const SUBJECT_PALETTES: Record<SubjectKey, SubjectPalette> = {
     key: 'Français',
     label: 'Français',
     headerDisplay: 'FRANÇAIS',
-    backgroundHex: '#C3DFEE',
+    backgroundHex: '#C4DFEE',
     gridLineHex: '#A7CADF',
     sectionBlueHex: '#1D4ED8',
     accentRedHex: '#DC2626',
@@ -42,8 +43,8 @@ export const SUBJECT_PALETTES: Record<SubjectKey, SubjectPalette> = {
     key: 'Histoire',
     label: 'Histoire',
     headerDisplay: 'HISTOIRE',
-    backgroundHex: '#F5EAAD',
-    gridLineHex: '#DFD28E',
+    backgroundHex: '#F5E9A3',
+    gridLineHex: '#DDD086',
     sectionBlueHex: '#1D4ED8',
     accentRedHex: '#DC2626',
   },
@@ -60,8 +61,8 @@ export const SUBJECT_PALETTES: Record<SubjectKey, SubjectPalette> = {
     key: 'EMC',
     label: 'EMC',
     headerDisplay: 'ÉDUCATION MORALE ET CIVIQUE',
-    backgroundHex: '#F5EAAD',
-    gridLineHex: '#DFD28E',
+    backgroundHex: '#F5E9A3',
+    gridLineHex: '#DDD086',
     sectionBlueHex: '#1D4ED8',
     accentRedHex: '#DC2626',
   },
@@ -117,11 +118,11 @@ export const DEFAULT_PRINT_PROFILE: PrintProfile = {
 };
 
 export const DEFAULT_META_PROMPT_TEMPLATE = `<Ancrage>
-Tu es un expert en ingénierie de prompts et en pédagogie. Ta mission est de générer un ou plusieurs prompts ultra-performants pour permettre à un élève de {CLASSE} de créer des fiches de révisions précises et synthétiques sur : {SUJET} pour réviser ce chapitre / contrôle.
+Tu es un expert en ingénierie de prompts et en pédagogie. Ta mission est de générer un ou plusieurs prompts ultra-performants pour permettre à un élève de {CLASSE} de créer des fiches de révisions exhaustives, fidèles et parfaitement structurées sur : {SUJET} pour réviser ce chapitre / contrôle.
 </Ancrage>
 
 <Lien>
-En te basant EXCLUSIVEMENT sur les sources PDF fournies en pièce jointe (cours et manuel éventuel), sans jamais inventer ni ajouter de notions absentes des documents, rédige d'abord les prompts de fiches puis génère le contenu complet de chaque fiche.
+En te basant EXCLUSIVEMENT sur les sources PDF fournies en pièce jointe (cours et manuel éventuel), sans jamais inventer ni omettre d'informations clés des documents, dresse l'inventaire complet page par page puis génère le contenu complet de chaque fiche.
 </Lien>
 
 <Rôle>
@@ -129,24 +130,24 @@ Agis en tant que Concepteur Pédagogique et expert dans la matière : {MATIERE}.
 </Rôle>
 
 <Objectif>
-Génère des fiches de révision sur le sujet suivant : {SUJET}.
-Les fiches générées doivent se concentrer uniquement sur les sources PDF en pièce jointe.
+Génère des fiches de révision complètes sur le sujet suivant : {SUJET}.
+Les fiches générées doivent couvrir 100 % des notions, dates, acteurs, exemples, définitions et formules présents dans les PDF en pièce jointe.
 </Objectif>
 
 <Format_du_Prompt Généré>
 Chaque fiche planifiée doit suivre ce modèle :
 1. Titre : "Prompt sur [Sujet]"
-2. Instruction principale : "Rédige une fiche de révision synthétique sur [Sujet]. La fiche doit inclure :"
-3. Liste à puces détaillant les points clés (phases, définitions, mécanismes, formules, enjeux).
+2. Instruction principale : "Rédige une fiche de révision structurée et complète sur [Sujet]. La fiche doit inclure :"
+3. Liste à puces détaillant tous les points clés (phases, acteurs, dates, définitions, mécanismes, formules, exemples).
 </Format_du_Prompt Généré>
 
 <Contraintes de Rédaction>
-- Adopte un rôle d'expert pour la matière (ex: expert historien, biologiste, physicien, professeur de français).
-- Ton clair, structuré, mémorisable, adapté à des fiches cartonnées 14 × 19 cm (Recto + Verso).
-- Chaque fiche doit être structurée en 3 ou 4 parties maximum (I, II, III, et éventuellement IV. À retenir / Vocabulaire ou Formules clés).
-- Idéalement 2 ou 3 fiches par chapitre/thème (sauf consigne contraire explicite de nombre de fiches). Ne multiplie pas les fiches inutilement.
-- Mets en évidence les mots-clés, dates, formules et notions cruciales pour qu'ils apparaissent en rouge gras sur la fiche.
-- Si le cours contient des schémas fonctionnels ou tableaux essentiels, inclus-les de manière concise.
+- Adopte un rôle d'expert pour la matière (ex: historien, biologiste, physicien, professeur de français).
+- Ton clair, synthétique, précis et aéré, remplissant ~82–92 % de chaque face 14 × 19 cm (Recto + Verso), sans jamais déborder ni copier-coller de longs pavés.
+- Chaque fiche doit être structurée en 3 ou 4 parties numérotées I., II., III., et IV. À retenir / Vocabulaire ou Schéma-bilan.
+- Adapte le nombre de fiches à la richesse réelle du chapitre (2 à 4 fiches si le cours + manuel est dense, jamais de fiche surchargée).
+- Mets en évidence en rouge gras les notions, phrases-clés, mécanismes et définitions cruciales (et pas uniquement des dates isolées).
+- Si le cours contient des schémas fonctionnels, cycles, hiérarchies ou tableaux essentiels, inclus-les proprement de façon compacte.
 </Contraintes de Rédaction>`;
 
 export const DEFAULT_META_PROMPT_PRESETS: MetaPromptPreset[] = [
@@ -213,7 +214,7 @@ export function buildCompiledMetaPrompt(params: {
   className: string;
   subject: SubjectKey;
   topic: string;
-  cardCount: 'auto' | '1' | '2' | '3';
+  cardCount: 'auto' | '1' | '2' | '3' | '4';
   extraInstructions?: string;
 }): string {
   const subjectLabel = SUBJECT_PALETTES[params.subject]?.label ?? params.subject;
@@ -234,10 +235,18 @@ export function buildCompiledMetaPrompt(params: {
   return compiled;
 }
 
+export function normalizeRomanNumeral(raw: string): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  if (/[.)°:\-]$/.test(trimmed)) return trimmed;
+  return `${trimmed}.`;
+}
+
 export function estimateSideDensity(
   side: FicheCard['leftSide'],
   fontSizePt: number,
-  lineHeight: number
+  lineHeight: number,
+  sideRole: 'recto' | 'verso' = 'recto'
 ): { estimatedChars: number; utilizationPercent: number; isOverflowRisk: boolean } {
   let chars = 0;
   let blockWeight = 0;
@@ -249,35 +258,36 @@ export function estimateSideDensity(
       if (block.type === 'paragraph') {
         const textLen = block.spans.reduce((acc, s) => acc + s.text.length, 0);
         chars += textLen;
-        blockWeight += Math.ceil(textLen / 56) * 14 + 6;
+        blockWeight += Math.ceil(textLen / 79) * 16.0 + 5.5;
       } else if (block.type === 'bulletList') {
         for (const item of block.items) {
           const textLen = item.spans.reduce((acc, s) => acc + s.text.length, 0);
           chars += textLen;
-          blockWeight += Math.ceil(textLen / 50) * 14 + 4;
+          blockWeight += Math.ceil(textLen / 75) * 16.0 + 4.8;
         }
       } else if (block.type === 'formulaBox') {
         chars += block.formula.length + (block.caption?.length ?? 0);
-        blockWeight += 52;
+        blockWeight += 48;
       } else if (block.type === 'table') {
-        chars += block.rows.length * 40;
-        blockWeight += 32 + block.rows.length * 22;
+        chars += block.rows.length * 48;
+        blockWeight += 32 + block.rows.length * 23;
       } else if (block.type === 'vocabList') {
         for (const item of block.items) {
-          chars += item.term.length + item.definition.length;
-          blockWeight += Math.ceil((item.term.length + item.definition.length) / 52) * 14 + 6;
+          const defPlain = item.definition.replace(/\[\/?rouge\]/g, '');
+          chars += item.term.length + defPlain.length;
+          blockWeight += Math.ceil((item.term.length + defPlain.length) / 76) * 16.0 + 5;
         }
       } else if (block.type === 'diagram') {
         chars += block.nodes.length * 16;
-        blockWeight += 225;
+        blockWeight += Math.min(235, 110 + block.nodes.length * 18);
       }
     }
   }
 
-  // Calibrated against 140x190mm (529x718px minus ~70px header = ~648px printable area)
-  const scaleFactor = (fontSizePt / 9.0) * (lineHeight / 1.32);
+  // Calibrated against measured Chromium render on 140x190mm (480px width; ~665px Recto, ~725px Verso)
+  const scaleFactor = (fontSizePt / 9.0) * (lineHeight / 1.34);
   const adjustedWeight = blockWeight * scaleFactor;
-  const maxCapacity = 620;
+  const maxCapacity = sideRole === 'verso' ? 725 : 665;
   const utilizationPercent = Math.round((adjustedWeight / maxCapacity) * 100);
 
   return {
@@ -295,31 +305,43 @@ export function spansToMarkup(spans: TextSpan[]): string {
   return spans
     .map((s) => {
       if (s.tone === 'redBold') return `[rouge]${s.text}[/rouge]`;
-      if (s.tone === 'bold') return `**${s.text}**`;
-      if (s.tone === 'underline') return `__${s.text}__`;
-      if (s.tone === 'italic') return `*${s.text}*`;
+      if (s.tone === 'bold') return s.italic ? `***${s.text}***` : `**${s.text}**`;
+      if (s.tone === 'underline') return s.italic ? `__*${s.text}*__` : `__${s.text}__`;
+      if (s.tone === 'italic' || s.italic) return `*${s.text}*`;
       return s.text;
     })
     .join('');
 }
 
-function splitRedBoldInside(
+function splitNestedInside(
   content: string,
   baseTone: NonNullable<TextSpan['tone']>
 ): TextSpan[] {
   const parts: TextSpan[] = [];
-  const redRegex = /\[rouge\]([\s\S]*?)\[\/rouge\]/g;
+  const nestedRegex = /(\[rouge\][\s\S]*?\[\/rouge\]|\*[^\s*](?:[^*\n]*?[^\s*])?\*)/g;
   let last = 0;
   let m: RegExpExecArray | null;
 
-  while ((m = redRegex.exec(content)) !== null) {
+  while ((m = nestedRegex.exec(content)) !== null) {
     if (m.index > last) {
       const before = content.slice(last, m.index).replace(/\[\/?rouge\]/g, '');
       if (before) parts.push({ text: before, tone: baseTone });
     }
-    const inner = m[1].replace(/\[\/?rouge\]/g, '');
-    if (inner) parts.push({ text: inner, tone: 'redBold' });
-    last = m.index + m[0].length;
+    const token = m[0];
+    if (token.startsWith('[rouge]') && token.endsWith('[/rouge]')) {
+      const inner = token.slice(7, -8).replace(/\[\/?rouge\]/g, '');
+      if (inner) parts.push({ text: inner, tone: 'redBold' });
+    } else if (token.startsWith('*') && token.endsWith('*') && token.length >= 3) {
+      const inner = token.slice(1, -1).replace(/\[\/?rouge\]/g, '');
+      if (inner) {
+        if (baseTone === 'underline' || baseTone === 'bold') {
+          parts.push({ text: inner, tone: baseTone, italic: true });
+        } else {
+          parts.push({ text: inner, tone: 'italic' });
+        }
+      }
+    }
+    last = m.index + token.length;
   }
 
   if (last < content.length) {
@@ -335,7 +357,8 @@ function splitRedBoldInside(
 export function markupToSpans(input: string): TextSpan[] {
   const safeInput = input || '';
   const tokens: TextSpan[] = [];
-  const regex = /(\[rouge\][\s\S]*?\[\/rouge\]|\*\*[\s\S]*?\*\*|__[\s\S]*?__|\*[\s\S]*?\*)/g;
+  const regex =
+    /(\[rouge\][\s\S]*?\[\/rouge\]|\*\*\*[\s\S]*?\*\*\*|\*\*[\s\S]*?\*\*|__[\s\S]*?__|\*[^\s*](?:[^*\n]*?[^\s*])?\*)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -347,12 +370,14 @@ export function markupToSpans(input: string): TextSpan[] {
     const raw = match[0];
     if (raw.startsWith('[rouge]') && raw.endsWith('[/rouge]')) {
       tokens.push({ text: raw.slice(7, -8).replace(/\[\/?rouge\]/g, ''), tone: 'redBold' });
+    } else if (raw.startsWith('***') && raw.endsWith('***') && raw.length > 6) {
+      tokens.push({ text: raw.slice(3, -3).replace(/\[\/?rouge\]/g, ''), tone: 'bold', italic: true });
     } else if (raw.startsWith('**') && raw.endsWith('**')) {
-      tokens.push(...splitRedBoldInside(raw.slice(2, -2), 'bold'));
+      tokens.push(...splitNestedInside(raw.slice(2, -2), 'bold'));
     } else if (raw.startsWith('__') && raw.endsWith('__')) {
-      tokens.push(...splitRedBoldInside(raw.slice(2, -2), 'underline'));
+      tokens.push(...splitNestedInside(raw.slice(2, -2), 'underline'));
     } else if (raw.startsWith('*') && raw.endsWith('*')) {
-      tokens.push(...splitRedBoldInside(raw.slice(1, -1), 'italic'));
+      tokens.push(...splitNestedInside(raw.slice(1, -1), 'italic'));
     }
     lastIndex = match.index + raw.length;
   }
@@ -458,6 +483,7 @@ function normalizeSide(
               title: typeof blk.title === 'string' && blk.title ? blk.title : 'Schéma',
               nodes: Array.isArray(blk.nodes) ? blk.nodes : [],
               edges: Array.isArray(blk.edges) ? blk.edges : [],
+              groups: Array.isArray(blk.groups) ? blk.groups : undefined,
               footnote: typeof blk.footnote === 'string' ? blk.footnote : undefined,
             });
             return {
@@ -522,8 +548,9 @@ export function parseDeckFromJsonInput(rawJson: string): FicheDeck {
       generatedPrompt: card.generatedPrompt,
       backgroundHex: card.backgroundHex || palette.backgroundHex,
       visualStyle: card.visualStyle === '3eB' ? '3eB' : '2ndE',
-      fontSizePt: typeof card.fontSizePt === 'number' ? card.fontSizePt : 9.0,
-      lineHeight: typeof card.lineHeight === 'number' ? card.lineHeight : 1.32,
+      fontSizePt: typeof card.fontSizePt === 'number' ? card.fontSizePt : 9.2,
+      lineHeight: typeof card.lineHeight === 'number' ? card.lineHeight : 1.35,
+      autoFillHeight: card.autoFillHeight !== false,
       leftSide: normalizeSide(card.leftSide ?? card.recto, idx, 'L'),
       rightSide: normalizeSide(card.rightSide ?? card.verso, idx, 'R'),
     };
@@ -559,11 +586,13 @@ export function sanitizeDiagramData(raw: {
   title?: unknown;
   nodes?: unknown[];
   edges?: unknown[];
+  groups?: unknown[];
   footnote?: unknown;
 }): {
   title: string;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
+  groups?: DiagramGroup[];
   footnote?: string;
 } {
   const title =
@@ -573,6 +602,7 @@ export function sanitizeDiagramData(raw: {
 
   const rawNodes = Array.isArray(raw.nodes) ? raw.nodes : [];
   const rawEdges = Array.isArray(raw.edges) ? raw.edges : [];
+  const rawGroups = Array.isArray(raw.groups) ? raw.groups : [];
 
   const numericCandidates = rawNodes
     .map((n) => n as Record<string, unknown>)
@@ -598,9 +628,9 @@ export function sanitizeDiagramData(raw: {
       id: typeof n.id === 'string' && n.id.trim() ? n.id.trim() : `node-${idx}`,
       label: typeof n.label === 'string' && n.label.trim() ? n.label.trim() : `Élément ${idx + 1}`,
       sublabel: typeof n.sublabel === 'string' && n.sublabel.trim() ? n.sublabel.trim() : undefined,
-      x: clamp(scaledX, 14, 86),
-      y: clamp(scaledY, 12, 88),
-      width: Number.isFinite(rawW) ? clamp(rawW, 24, 48) : 34,
+      x: clamp(scaledX, 12, 88),
+      y: clamp(scaledY, 8, 94),
+      width: Number.isFinite(rawW) ? clamp(rawW, 24, 52) : 34,
       tone: normalizeDiagramTone(n.tone),
     };
   });
@@ -611,10 +641,10 @@ export function sanitizeDiagramData(raw: {
       const dx = Math.abs(nodes[j].x - nodes[i].x);
       const dy = Math.abs(nodes[j].y - nodes[i].y);
       if (dx < 24 && dy < 16) {
-        if (nodes[j].y + 18 <= 88) {
-          nodes[j].y = clamp(nodes[i].y + 20, 12, 88);
+        if (nodes[j].y + 18 <= 92) {
+          nodes[j].y = clamp(nodes[i].y + 20, 8, 94);
         } else {
-          nodes[j].x = clamp(nodes[i].x < 50 ? nodes[i].x + 34 : nodes[i].x - 34, 14, 86);
+          nodes[j].x = clamp(nodes[i].x < 50 ? nodes[i].x + 34 : nodes[i].x - 34, 12, 88);
         }
       }
     }
@@ -646,7 +676,106 @@ export function sanitizeDiagramData(raw: {
     })
     .filter((e): e is DiagramEdge => e !== null);
 
-  return { title, nodes, edges, footnote };
+  const groups: DiagramGroup[] = rawGroups
+    .map((g, idx): DiagramGroup | null => {
+      const rec = g as Record<string, unknown>;
+      if (!rec || typeof rec !== 'object') return null;
+      const nodeIds = Array.isArray(rec.nodeIds)
+        ? rec.nodeIds.map((nid) => findNodeId(nid)).filter((id): id is string => Boolean(id))
+        : [];
+      if (nodeIds.length === 0) return null;
+      return {
+        id: typeof rec.id === 'string' && rec.id.trim() ? rec.id.trim() : `grp-${idx}`,
+        title: typeof rec.title === 'string' && rec.title.trim() ? rec.title.trim() : 'Groupe',
+        subtitle: typeof rec.subtitle === 'string' && rec.subtitle.trim() ? rec.subtitle.trim() : undefined,
+        nodeIds,
+        tone: normalizeDiagramTone(rec.tone),
+      };
+    })
+    .filter((g): g is DiagramGroup => g !== null);
+
+  return {
+    title,
+    nodes,
+    edges,
+    ...(groups.length > 0 ? { groups } : {}),
+    footnote,
+  };
+}
+
+export interface AutoSideTypography {
+  fontSizePt: number;
+  lineHeight: number;
+  sectionGapPx: number;
+  blockGapPx: number;
+  bulletGapPx: number;
+  estimatedUtilizationPercent: number;
+}
+
+export function computeAutoSideTypography(
+  side: FicheCard['leftSide'],
+  baseFontSizePt: number,
+  baseLineHeight: number,
+  sideRole: 'recto' | 'verso' = 'recto'
+): AutoSideTypography {
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+  let font = Number(clamp(baseFontSizePt, 7.6, 12.0).toFixed(2));
+  let lh = Number(clamp(baseLineHeight, 1.22, 1.54).toFixed(2));
+
+  if (!side.sections || side.sections.length === 0) {
+    return {
+      fontSizePt: font,
+      lineHeight: lh,
+      sectionGapPx: 12,
+      blockGapPx: 6,
+      bulletGapPx: 4,
+      estimatedUtilizationPercent: 0,
+    };
+  }
+
+  let density = estimateSideDensity(side, font, lh, sideRole);
+
+  // Step down if overflowing (> 98%)
+  for (let i = 0; i < 18 && density.utilizationPercent > 98; i += 1) {
+    if (font <= 7.6 && lh <= 1.22) break;
+    if (font > 7.6) font = Number(Math.max(7.6, font - 0.2).toFixed(2));
+    if (lh > 1.22) lh = Number(Math.max(1.22, lh - 0.02).toFixed(2));
+    density = estimateSideDensity(side, font, lh, sideRole);
+  }
+
+  // Step up independently on sparse sides (< 92%) so text is larger & fills the 14x19cm page
+  for (let i = 0; i < 20 && density.utilizationPercent < 92; i += 1) {
+    if (font >= 12.0 && lh >= 1.54) break;
+    const nextFont = font < 12.0 ? Number(Math.min(12.0, font + 0.2).toFixed(2)) : font;
+    const nextLh = lh < 1.54 ? Number(Math.min(1.54, lh + 0.02).toFixed(2)) : lh;
+    const cand = estimateSideDensity(side, nextFont, nextLh, sideRole);
+    if (cand.utilizationPercent > 96) {
+      const halfFont = font < 12.0 ? Number(Math.min(12.0, font + 0.1).toFixed(2)) : font;
+      const halfCand = estimateSideDensity(side, halfFont, lh, sideRole);
+      if (halfCand.utilizationPercent <= 96) {
+        font = halfFont;
+        density = halfCand;
+      }
+      break;
+    }
+    font = nextFont;
+    lh = nextLh;
+    density = cand;
+  }
+
+  const slack = Math.max(0, 96 - density.utilizationPercent);
+  const sectionGapPx = clamp(Math.round(11 + slack * 0.75), 10, 28);
+  const blockGapPx = clamp(Math.round(6 + slack * 0.4), 5, 14);
+  const bulletGapPx = clamp(Math.round(4 + slack * 0.28), 3, 10);
+
+  return {
+    fontSizePt: font,
+    lineHeight: lh,
+    sectionGapPx,
+    blockGapPx,
+    bulletGapPx,
+    estimatedUtilizationPercent: density.utilizationPercent,
+  };
 }
 
 export function rebalanceCardLayout(card: FicheCard): FicheCard {
@@ -665,53 +794,79 @@ export function rebalanceCardLayout(card: FicheCard): FicheCard {
     rightSections = rightSections.slice(splitAt);
   }
 
-  for (let step = 0; step < 3; step += 1) {
-    const leftD = estimateSideDensity({ sections: leftSections }, fontSizePt, lineHeight);
-    const rightD = estimateSideDensity({ sections: rightSections }, fontSizePt, lineHeight);
+  for (let step = 0; step < 4; step += 1) {
+    const leftD = estimateSideDensity({ sections: leftSections }, fontSizePt, lineHeight, 'recto');
+    const rightD = estimateSideDensity({ sections: rightSections }, fontSizePt, lineHeight, 'verso');
+    const currentPeak = Math.max(leftD.utilizationPercent, rightD.utilizationPercent);
 
-    if (
-      leftD.utilizationPercent > 96 &&
-      rightD.utilizationPercent < 76 &&
-      leftSections.length > 1
-    ) {
+    if (leftD.utilizationPercent > 95 && leftSections.length > 1) {
       const moved = leftSections[leftSections.length - 1];
-      leftSections = leftSections.slice(0, -1);
-      rightSections = [moved, ...rightSections];
-      continue;
+      const nextLeft = leftSections.slice(0, -1);
+      const nextRight = [moved, ...rightSections];
+      const candL = estimateSideDensity({ sections: nextLeft }, fontSizePt, lineHeight, 'recto');
+      const candR = estimateSideDensity({ sections: nextRight }, fontSizePt, lineHeight, 'verso');
+      const candPeak = Math.max(candL.utilizationPercent, candR.utilizationPercent);
+      if (candPeak < currentPeak && candR.utilizationPercent <= 99) {
+        leftSections = nextLeft;
+        rightSections = nextRight;
+        continue;
+      }
     }
 
-    if (
-      rightD.utilizationPercent > 96 &&
-      leftD.utilizationPercent < 76 &&
-      rightSections.length > 1
-    ) {
+    if (rightD.utilizationPercent > 95 && rightSections.length > 1) {
       const moved = rightSections[0];
-      rightSections = rightSections.slice(1);
-      leftSections = [...leftSections, moved];
-      continue;
+      const nextRight = rightSections.slice(1);
+      const nextLeft = [...leftSections, moved];
+      const candL = estimateSideDensity({ sections: nextLeft }, fontSizePt, lineHeight, 'recto');
+      const candR = estimateSideDensity({ sections: nextRight }, fontSizePt, lineHeight, 'verso');
+      const candPeak = Math.max(candL.utilizationPercent, candR.utilizationPercent);
+      if (candPeak < currentPeak && candL.utilizationPercent <= 99) {
+        rightSections = nextRight;
+        leftSections = nextLeft;
+        continue;
+      }
     }
     break;
   }
 
-  // Gently scale font/lineHeight down if either side is still > 98%
-  for (let step = 0; step < 6; step += 1) {
-    const leftD = estimateSideDensity({ sections: leftSections }, fontSizePt, lineHeight);
-    const rightD = estimateSideDensity({ sections: rightSections }, fontSizePt, lineHeight);
+  // Gently scale font/lineHeight down if either side overflows (> 98%),
+  // or step up (up to 10.4pt / 1.44) if both sides still have bottom space (< 88%).
+  for (let step = 0; step < 8; step += 1) {
+    const leftD = estimateSideDensity({ sections: leftSections }, fontSizePt, lineHeight, 'recto');
+    const rightD = estimateSideDensity({ sections: rightSections }, fontSizePt, lineHeight, 'verso');
     if (leftD.utilizationPercent <= 98 && rightD.utilizationPercent <= 98) {
       break;
     }
-    if (fontSizePt > 8.0) {
+    if (fontSizePt > 7.7) {
       fontSizePt = Number((fontSizePt - 0.2).toFixed(1));
     }
-    if (lineHeight > 1.22) {
+    if (lineHeight > 1.24) {
       lineHeight = Number((lineHeight - 0.02).toFixed(2));
     }
+  }
+
+  for (let step = 0; step < 8; step += 1) {
+    const leftD = estimateSideDensity({ sections: leftSections }, fontSizePt, lineHeight, 'recto');
+    const rightD = estimateSideDensity({ sections: rightSections }, fontSizePt, lineHeight, 'verso');
+    if (leftD.utilizationPercent >= 88 || rightD.utilizationPercent >= 88) {
+      break;
+    }
+    const nextFont = fontSizePt < 10.4 ? Number((fontSizePt + 0.2).toFixed(1)) : fontSizePt;
+    const nextLh = lineHeight < 1.44 ? Number((lineHeight + 0.02).toFixed(2)) : lineHeight;
+    const candL = estimateSideDensity({ sections: leftSections }, nextFont, nextLh, 'recto');
+    const candR = estimateSideDensity({ sections: rightSections }, nextFont, nextLh, 'verso');
+    if (candL.utilizationPercent > 96 || candR.utilizationPercent > 96) {
+      break;
+    }
+    fontSizePt = nextFont;
+    lineHeight = nextLh;
   }
 
   return {
     ...card,
     fontSizePt,
     lineHeight,
+    autoFillHeight: card.autoFillHeight ?? true,
     leftSide: { sections: leftSections },
     rightSide: { sections: rightSections },
   };

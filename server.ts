@@ -9,11 +9,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
+  estimateSideDensity,
   markupToSpans,
+  normalizeRomanNumeral,
   rebalanceCardLayout,
   sanitizeDiagramData,
   SUBJECT_PALETTES,
 } from './src/utils/ficheLogic';
+import {
+  collectUncoveredFactLines,
+  computeTargetCardCount,
+  selectRelevantBatchIndices,
+  serializeBatchInventoryForPrompt,
+  splitPdfBufferIntoPageBatches,
+  type BatchInventoryLike,
+} from './src/utils/pdfBatching';
 import { ensurePdfFilename, validatePdfCandidate } from './src/utils/pdfValidation';
 import type { FicheCard, FicheDeck, SubjectKey } from './src/types/fiche';
 
@@ -119,16 +129,16 @@ const blockSchema = {
     nodes: {
       type: Type.ARRAY,
       description:
-        'OBLIGATOIRE et NON VIDE (3 à 6 objets) si type==="diagram" : nœuds du schéma vectoriel.',
+        'OBLIGATOIRE et NON VIDE (3 à 7 objets) si type==="diagram" : nœuds du schéma vectoriel.',
       items: {
         type: Type.OBJECT,
         properties: {
           id: { type: Type.STRING, description: 'Identifiant court unique, ex: n1, n2, n3' },
-          label: { type: Type.STRING, description: 'Libellé court <= 26 caractères' },
-          sublabel: { type: Type.STRING, description: 'Sous-titre court optionnel <= 26 caractères' },
+          label: { type: Type.STRING, description: 'Libellé concis <= 32 caractères' },
+          sublabel: { type: Type.STRING, description: 'Sous-titre court optionnel <= 34 caractères' },
           x: { type: Type.NUMBER, description: 'Coordonnée horizontale entre 18 et 82' },
-          y: { type: Type.NUMBER, description: 'Coordonnée verticale entre 16 et 84' },
-          width: { type: Type.NUMBER, description: 'Largeur en % entre 26 et 44' },
+          y: { type: Type.NUMBER, description: 'Coordonnée verticale entre 10 et 92' },
+          width: { type: Type.NUMBER, description: 'Largeur en % entre 26 et 48' },
           tone: { type: Type.STRING, description: 'Uniquement : blue, amber, green, red, slate' },
         },
         required: ['id', 'label', 'x', 'y'],
@@ -147,6 +157,22 @@ const blockSchema = {
           dashed: { type: Type.BOOLEAN },
         },
         required: ['from', 'to'],
+      },
+    },
+    groups: {
+      type: Type.ARRAY,
+      description:
+        'Optionnel : cadres regroupant plusieurs nœuds (ex: deux compartiments ou colonnes parallèles).',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING },
+          title: { type: Type.STRING },
+          subtitle: { type: Type.STRING },
+          nodeIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+          tone: { type: Type.STRING },
+        },
+        required: ['id', 'title', 'nodeIds'],
       },
     },
     footnote: { type: Type.STRING },
@@ -194,12 +220,53 @@ const diagramRepairSchema = {
               required: ['from', 'to'],
             },
           },
+          groups: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                title: { type: Type.STRING },
+                subtitle: { type: Type.STRING },
+                nodeIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                tone: { type: Type.STRING },
+              },
+              required: ['id', 'title', 'nodeIds'],
+            },
+          },
         },
         required: ['targetKey', 'title', 'nodes', 'edges'],
       },
     },
   },
   required: ['diagrams'],
+};
+
+const batchInventorySchema = {
+  type: Type.OBJECT,
+  properties: {
+    pages: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          pageRef: { type: Type.STRING, description: 'Ex: Manuel p. 6 ou Cours p. 2' },
+          headings: { type: Type.ARRAY, items: { type: Type.STRING } },
+          keyFactsAndConcepts: {
+            type: Type.ARRAY,
+            description:
+              'TOUS les faits, notions, dates avec contexte, personnages, définitions, arguments, causes, conséquences, extraits de documents et exemples présents sur cette page (y compris manuscrits, en marge ou encadrés).',
+            items: { type: Type.STRING },
+          },
+          formulasAndData: { type: Type.ARRAY, items: { type: Type.STRING } },
+          tablesFound: { type: Type.ARRAY, items: { type: Type.STRING } },
+          diagramsFound: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+        required: ['pageRef', 'headings', 'keyFactsAndConcepts'],
+      },
+    },
+  },
+  required: ['pages'],
 };
 
 const sectionSchema = {
@@ -213,54 +280,87 @@ const sectionSchema = {
   required: ['romanNumeral', 'title', 'blocks'],
 };
 
-const cardsResponseSchema = {
+const coveragePlanSchema = {
   type: Type.OBJECT,
   properties: {
-    extractedSections: {
-      type: Type.ARRAY,
-      description:
-        'Inventaire exhaustif page par page (PDF 1 p.1, PDF 1 p.2, etc.) de tous les chapitres, sous-titres manuscrits, dates, formules, définitions, tableaux et documents trouvés dans les PDF.',
-      items: { type: Type.STRING },
-    },
+    deckTitle: { type: Type.STRING },
     keyVisualSchemas: {
       type: Type.ARRAY,
-      description:
-        'Mécanismes, organisations institutionnelles, chronologies ou tableaux repérés dans les PDF.',
+      description: 'Mécanismes, institutions ou tableaux clés repérés dans les PDF.',
       items: { type: Type.STRING },
     },
-    deckTitle: { type: Type.STRING },
     verificationNotes: {
       type: Type.STRING,
-      description:
-        'Court bilan de vérification confirmant quelles sources/pages ont été couvertes et s’il y avait des passages manuscrits difficiles à lire.',
+      description: 'Audit confirmant que 100 % des pages et notions des lots sont réparties.',
     },
-    cards: {
+    cardsPlan: {
       type: Type.ARRAY,
       items: {
         type: Type.OBJECT,
         properties: {
           title: { type: Type.STRING },
           generatedPrompt: { type: Type.STRING },
-          leftSide: {
-            type: Type.OBJECT,
-            properties: {
-              sections: { type: Type.ARRAY, items: sectionSchema },
-            },
-            required: ['sections'],
+          assignedBatchIndices: {
+            type: Type.ARRAY,
+            description: 'Indices 0-based des lots PDF principaux à rattacher à cette fiche.',
+            items: { type: Type.INTEGER },
           },
-          rightSide: {
-            type: Type.OBJECT,
-            properties: {
-              sections: { type: Type.ARRAY, items: sectionSchema },
-            },
-            required: ['sections'],
+          focusTopics: { type: Type.ARRAY, items: { type: Type.STRING } },
+          rectoOutline: {
+            type: Type.STRING,
+            description: 'Plan détaillé du RECTO (I. et II.)',
           },
+          versoOutline: {
+            type: Type.STRING,
+            description: 'Plan détaillé du VERSO (III. et IV. À retenir / Vocabulaire / Schéma / Tableau)',
+          },
+          assignedFactsVerbatim: {
+            type: Type.ARRAY,
+            description:
+              'Liste EXHAUSTIVE de tous les faits, dates, acteurs, définitions, exemples et chiffres extraits devant impérativement figurer dans cette fiche.',
+            items: { type: Type.STRING },
+          },
+          shouldIncludeDiagram: { type: Type.BOOLEAN },
+          diagramDescription: { type: Type.STRING },
+          shouldIncludeTable: { type: Type.BOOLEAN },
         },
-        required: ['title', 'generatedPrompt', 'leftSide', 'rightSide'],
+        required: [
+          'title',
+          'generatedPrompt',
+          'assignedBatchIndices',
+          'focusTopics',
+          'rectoOutline',
+          'versoOutline',
+          'assignedFactsVerbatim',
+          'shouldIncludeDiagram',
+        ],
       },
     },
   },
-  required: ['extractedSections', 'deckTitle', 'verificationNotes', 'cards'],
+  required: ['deckTitle', 'verificationNotes', 'cardsPlan'],
+};
+
+const singleCardSchema = {
+  type: Type.OBJECT,
+  properties: {
+    title: { type: Type.STRING },
+    generatedPrompt: { type: Type.STRING },
+    leftSide: {
+      type: Type.OBJECT,
+      properties: {
+        sections: { type: Type.ARRAY, items: sectionSchema },
+      },
+      required: ['sections'],
+    },
+    rightSide: {
+      type: Type.OBJECT,
+      properties: {
+        sections: { type: Type.ARRAY, items: sectionSchema },
+      },
+      required: ['sections'],
+    },
+  },
+  required: ['title', 'generatedPrompt', 'leftSide', 'rightSide'],
 };
 
 interface PlannedPrompt {
@@ -287,9 +387,17 @@ interface ChunkUploadSession {
   updatedAt: number;
 }
 
+interface CachedUploadedPdf {
+  buffer: Buffer;
+  displayName: string;
+  createdAt: number;
+}
+
 const generationJobs = new Map<string, GenerationJob>();
 const chunkUploadSessions = new Map<string, ChunkUploadSession>();
+const uploadedPdfBufferCache = new Map<string, CachedUploadedPdf>();
 const JOB_TTL_MS = 15 * 60 * 1000;
+const UPLOAD_CACHE_TTL_MS = 25 * 60 * 1000;
 
 setInterval(() => {
   const cutoff = Date.now() - JOB_TTL_MS;
@@ -303,7 +411,49 @@ setInterval(() => {
       chunkUploadSessions.delete(uploadId);
     }
   }
+  const cacheCutoff = Date.now() - UPLOAD_CACHE_TTL_MS;
+  for (const [cacheId, entry] of uploadedPdfBufferCache.entries()) {
+    if (entry.createdAt < cacheCutoff) {
+      uploadedPdfBufferCache.delete(cacheId);
+    }
+  }
 }, 2 * 60 * 1000).unref();
+
+function storePdfBufferInCache(buffer: Buffer, displayName: string): string {
+  // Bound total cached entries to prevent excessive RAM usage
+  if (uploadedPdfBufferCache.size >= 16) {
+    const oldestKey = uploadedPdfBufferCache.keys().next().value;
+    if (oldestKey) uploadedPdfBufferCache.delete(oldestKey);
+  }
+  const cacheId = crypto.randomUUID();
+  uploadedPdfBufferCache.set(cacheId, {
+    buffer,
+    displayName,
+    createdAt: Date.now(),
+  });
+  return cacheId;
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const current = nextIdx;
+        nextIdx += 1;
+        if (current >= items.length) break;
+        results[current] = await worker(items[current], current);
+      }
+    })
+  );
+  return results;
+}
 
 const chunkUpload = multer({
   storage: multer.memoryStorage(),
@@ -383,6 +533,7 @@ function sanitizeGeneratedBlocks(blocks: Record<string, unknown>[], prefix: stri
         title: typeof raw.title === 'string' ? raw.title : 'Schéma-bilan',
         nodes: Array.isArray(raw.nodes) ? raw.nodes : [],
         edges: Array.isArray(raw.edges) ? raw.edges : [],
+        groups: Array.isArray(raw.groups) ? raw.groups : undefined,
         footnote: typeof raw.footnote === 'string' ? raw.footnote : undefined,
       });
       if (sanitized.nodes.length === 0) {
@@ -553,11 +704,14 @@ async function startServer() {
       }
 
       const ai = createGeminiClient();
-      const uploaded = await uploadBufferToGeminiFiles(ai, file.buffer, file.originalname);
+      const displayName = ensurePdfFilename(file.originalname);
+      const uploaded = await uploadBufferToGeminiFiles(ai, file.buffer, displayName);
+      const localCacheId = storePdfBufferInCache(Buffer.from(file.buffer), displayName);
       res.json({
         ...uploaded,
-        displayName: ensurePdfFilename(file.originalname),
+        displayName,
         size: file.size,
+        localCacheId,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Erreur lors du transfert du PDF.';
@@ -667,10 +821,12 @@ async function startServer() {
 
       const ai = createGeminiClient();
       const uploaded = await uploadBufferToGeminiFiles(ai, fullBuffer, session.displayName);
+      const localCacheId = storePdfBufferInCache(fullBuffer, session.displayName);
       res.json({
         ...uploaded,
         displayName: session.displayName,
         size: fullBuffer.length,
+        localCacheId,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Erreur lors de l’assemblage du PDF.';
@@ -699,7 +855,13 @@ async function startServer() {
   app.post('/api/generate-fiches', handleMulterUpload(upload.array('pdfs', 5)), async (req, res) => {
     try {
       const files = (req.files as Express.Multer.File[]) || [];
-      let preUploadedFiles: Array<{ uri: string; name?: string; mimeType?: string; displayName?: string }> = [];
+      let preUploadedFiles: Array<{
+        uri: string;
+        name?: string;
+        mimeType?: string;
+        displayName?: string;
+        localCacheId?: string;
+      }> = [];
       if (typeof req.body.uploadedFiles === 'string' && req.body.uploadedFiles.trim()) {
         try {
           const parsed = JSON.parse(req.body.uploadedFiles);
@@ -748,9 +910,8 @@ async function startServer() {
       const extraInstructions = String(req.body.extraInstructions || '').trim();
       const visualStyle = req.body.visualStyle === '3eB' ? '3eB' : '2ndE';
 
-      // Copy buffers safely so background job is decoupled from HTTP request lifecycle
       const bufferedFiles = files.map((f) => ({
-        originalname: f.originalname,
+        originalname: ensurePdfFilename(f.originalname),
         size: f.size,
         buffer: Buffer.from(f.buffer),
       }));
@@ -760,206 +921,508 @@ async function startServer() {
       const job: GenerationJob = {
         id: jobId,
         status: 'running',
-        stageMessage: '1/2 Préparation et lecture des sources PDF...',
+        stageMessage: '1/4 Découpage des PDF par lots de 5 pages...',
         startedAt: nowMs,
         updatedAt: nowMs,
       };
       generationJobs.set(jobId, job);
 
-      // Run Gemini pipeline asynchronously so Cloud Run / mobile connections never drop
       void (async () => {
         const geminiFileNamesToCleanup: string[] = preUploadedFiles
           .map((pf) => pf.name)
           .filter((n): n is string => Boolean(n));
+        const consumedLocalCacheIds: string[] = preUploadedFiles
+          .map((pf) => pf.localCacheId)
+          .filter((id): id is string => Boolean(id));
 
         const setStage = (msg: string) => {
           job.stageMessage = msg;
           job.updatedAt = Date.now();
         };
 
-        try {
-          const totalMultipartBytes = bufferedFiles.reduce((sum, f) => sum + f.size, 0);
-          const useFilesApiForMultipart = totalMultipartBytes > 8 * 1024 * 1024;
+        type GeminiContentPart =
+          | { text: string }
+          | { inlineData: { mimeType: string; data: string } }
+          | { fileData: { fileUri: string; mimeType: string } };
 
-          if (useFilesApiForMultipart && bufferedFiles.length > 0) {
-            setStage('Envoi des PDF vers le lecteur haute capacité...');
+        const callGeminiJson = async (
+          stageLabel: string,
+          parts: GeminiContentPart[],
+          schema: Record<string, unknown>,
+          thinkingLevel: ThinkingLevel
+        ) => {
+          const attempts: Array<{ model: string; waitMs: number; useThinking: boolean }> = [
+            { model: 'gemini-4-hydrogen', waitMs: 2500, useThinking: true },
+            { model: 'gemini-4-hydrogen', waitMs: 5000, useThinking: true },
+            { model: 'gemini-4-hydrogen', waitMs: 7500, useThinking: true },
+            { model: 'gemini-3.1-flash-lite', waitMs: 0, useThinking: false },
+          ];
+          let lastErr: unknown;
+          for (let i = 0; i < attempts.length; i += 1) {
+            const cfg = attempts[i];
+            try {
+              return await ai.models.generateContent({
+                model: cfg.model,
+                contents: { parts },
+                config: {
+                  ...(cfg.useThinking ? { thinkingConfig: { thinkingLevel } } : {}),
+                  responseMimeType: 'application/json',
+                  responseSchema: schema,
+                },
+              });
+            } catch (genErr) {
+              lastErr = genErr;
+              console.warn(
+                `[/api/generate-fiches job ${jobId}] Attempt ${i + 1} (${cfg.model}) failed:`,
+                genErr instanceof Error ? genErr.message : String(genErr)
+              );
+              if (i < attempts.length - 1 && isTransientGeminiError(genErr)) {
+                setStage(
+                  i === attempts.length - 2
+                    ? 'Basculement de secours sur le moteur haute disponibilité...'
+                    : `Pic de charge passager, nouvelle tentative (${i + 2}/${attempts.length})...`
+                );
+                if (cfg.waitMs > 0) {
+                  await new Promise((r) => setTimeout(r, cfg.waitMs));
+                }
+                setStage(stageLabel);
+                continue;
+              }
+              throw genErr;
+            }
+          }
+          throw lastErr ?? new Error('Aucune réponse reçue du modèle.');
+        };
+
+        try {
+          interface PreparedBatch {
+            batchIndex: number;
+            displayName: string;
+            batchLabel: string;
+            startPage: number;
+            endPage: number | null;
+            totalPages: number | null;
+            part: GeminiContentPart;
           }
 
-          const multipartParts = useFilesApiForMultipart
-            ? await Promise.all(
-                bufferedFiles.map(async (file) => {
-                  const uploaded = await uploadBufferToGeminiFiles(
-                    ai,
-                    file.buffer,
-                    file.originalname
-                  );
-                  geminiFileNamesToCleanup.push(uploaded.name);
-                  return {
-                    fileData: {
-                      fileUri: uploaded.uri,
-                      mimeType: 'application/pdf',
-                    },
-                  };
-                })
-              )
-            : bufferedFiles.map((file) => ({
-                inlineData: {
-                  mimeType: 'application/pdf',
-                  data: file.buffer.toString('base64'),
-                },
-              }));
+          const preparedBatches: PreparedBatch[] = [];
+          let totalKnownPages = 0;
 
-          const preUploadedParts = preUploadedFiles.map((pf) => ({
-            fileData: {
-              fileUri: pf.uri,
-              mimeType: pf.mimeType || 'application/pdf',
-            },
-          }));
-
-          const pdfParts = [...preUploadedParts, ...multipartParts];
-
-          const generateWithRetry = async (
-            stageLabel: string,
-            promptText: string,
-            schema: Record<string, unknown>,
-            thinkingLevel: ThinkingLevel,
-            includePdfs = true
-          ) => {
-            const attempts: Array<{ model: string; waitMs: number; useThinking: boolean }> = [
-              { model: 'gemini-4-hydrogen', waitMs: 4000, useThinking: true },
-              { model: 'gemini-4-hydrogen', waitMs: 2500, useThinking: true },
-              { model: 'gemini-3.1-flash-lite', waitMs: 0, useThinking: false },
-            ];
-            let lastErr: unknown;
-            for (let i = 0; i < attempts.length; i += 1) {
-              const cfg = attempts[i];
-              try {
-                return await ai.models.generateContent({
-                  model: cfg.model,
-                  contents: {
-                    parts: includePdfs ? [...pdfParts, { text: promptText }] : [{ text: promptText }],
-                  },
-                  config: {
-                    ...(cfg.useThinking ? { thinkingConfig: { thinkingLevel } } : {}),
-                    responseMimeType: 'application/json',
-                    responseSchema: schema,
-                  },
-                });
-              } catch (genErr) {
-                lastErr = genErr;
-                console.warn(
-                  `[/api/generate-fiches] Attempt ${i + 1} (${cfg.model}) failed:`,
-                  genErr instanceof Error ? genErr.message : String(genErr)
-                );
-                if (i < attempts.length - 1 && isTransientGeminiError(genErr)) {
-                  setStage(
-                    i === attempts.length - 2
-                      ? 'Basculement vers le moteur haute disponibilité...'
-                      : `Pic de charge passager, nouvelle tentative (${i + 2}/${attempts.length})...`
-                  );
-                  if (cfg.waitMs > 0) {
-                    await new Promise((r) => setTimeout(r, cfg.waitMs));
-                  }
-                  setStage(stageLabel);
-                  continue;
-                }
-                throw genErr;
-              }
+          const enqueueBufferBatches = async (buf: Buffer, displayName: string) => {
+            const split = await splitPdfBufferIntoPageBatches(buf, displayName, 5);
+            if (split[0]?.totalPages) {
+              totalKnownPages += split[0].totalPages;
+            } else {
+              totalKnownPages += split.length * 4;
             }
-            throw lastErr ?? new Error('Aucune réponse reçue du modèle.');
+            for (const b of split) {
+              let part: GeminiContentPart;
+              if (b.buffer.length <= 3.5 * 1024 * 1024) {
+                part = {
+                  inlineData: {
+                    mimeType: 'application/pdf',
+                    data: b.buffer.toString('base64'),
+                  },
+                };
+              } else {
+                const uploaded = await uploadBufferToGeminiFiles(ai, b.buffer, b.batchLabel);
+                geminiFileNamesToCleanup.push(uploaded.name);
+                part = {
+                  fileData: {
+                    fileUri: uploaded.uri,
+                    mimeType: 'application/pdf',
+                  },
+                };
+              }
+              preparedBatches.push({
+                batchIndex: preparedBatches.length,
+                displayName: b.displayName,
+                batchLabel: b.batchLabel,
+                startPage: b.startPage,
+                endPage: b.endPage,
+                totalPages: b.totalPages,
+                part,
+              });
+            }
           };
 
-          const mainStageLabel = '1/2 Analyse page par page des PDF & rédaction des fiches...';
-          setStage(mainStageLabel);
+          for (const pf of preUploadedFiles) {
+            const name = ensurePdfFilename(pf.displayName || 'document.pdf');
+            const cached = pf.localCacheId ? uploadedPdfBufferCache.get(pf.localCacheId) : undefined;
+            if (cached) {
+              await enqueueBufferBatches(cached.buffer, cached.displayName || name);
+            } else {
+              totalKnownPages += 6;
+              preparedBatches.push({
+                batchIndex: preparedBatches.length,
+                displayName: name,
+                batchLabel: name,
+                startPage: 1,
+                endPage: null,
+                totalPages: null,
+                part: {
+                  fileData: {
+                    fileUri: pf.uri,
+                    mimeType: pf.mimeType || 'application/pdf',
+                  },
+                },
+              });
+            }
+          }
 
-          const unifiedPrompt = `
-Agis en tant que professeur expert en ${subject} pour une classe de ${className} et applique la méthode NotebookLM.
-Tu dois analyser INTÉGRALEMENT tous les documents PDF joints (cours scanné manuscrit ou tapé ET manuel éventuel), de la PREMIÈRE à la DERNIÈRE page.
-RÈGLE D'OR ABSOLUE : Utilise EXCLUSIVEMENT les informations réellement présentes dans les PDF. N'invente aucune notion absente des sources.
+          for (const bf of bufferedFiles) {
+            await enqueueBufferBatches(bf.buffer, bf.originalname);
+          }
+
+          const sourceNames = [
+            ...preUploadedFiles.map((pf) => ensurePdfFilename(pf.displayName || 'document.pdf')),
+            ...bufferedFiles.map((f) => f.originalname),
+          ];
+
+          // =========================================================================
+          // STAGE 1 : EXHAUSTIVE PAGE-BY-PAGE EXTRACTION (5 PAGES MAX PER CALL)
+          // =========================================================================
+          let completedBatches = 0;
+          setStage(
+            `1/4 Lecture intégrale page par page (0/${preparedBatches.length} lots)...`
+          );
+
+          const batchInventories: BatchInventoryLike[] = await runWithConcurrency(
+            preparedBatches,
+            3,
+            async (batch) => {
+              const pageWindow =
+                batch.endPage !== null
+                  ? `pages ${batch.startPage} à ${batch.endPage} (sur ${batch.totalPages ?? '?'})`
+                  : 'toutes les pages de ce document';
+
+              const extractPrompt = `
+Tu dois effectuer un RELEVÉ EXHAUSTIF ET FIDÈLE de cet extrait PDF : "${batch.batchLabel}" (${pageWindow}).
+Matière : ${subject} | Classe : ${className} | Chapitre : ${topic}
+
+CONSIGNES IMPÉRATIVES :
+1. Lis CHAQUE PAGE de cet extrait du haut en bas (notes manuscrites d'élève, textes de cours, documents du manuel, cartes, encadrés vocabulaire, légendes, tableaux, schémas, marges).
+2. Ne résume pas en termes vagues ! Transcris dans "keyFactsAndConcepts" TOUS les faits précis : dates exactes + événement, noms d'acteurs/lieux/cités, définitions complètes, mécanismes, causes/conséquences, chiffres et exemples du manuel (ex: noms de cités, édits, lois, personnages, notions).
+3. Utilise des références explicites dans "pageRef" (ex: "${batch.displayName} — p. ${batch.startPage}" ...).
+4. Reproduis toutes les formules/données chiffrées dans "formulasAndData", les tableaux dans "tablesFound", et les schémas/organigrammes dans "diagramsFound".
+`;
+              const resp = await callGeminiJson(
+                `1/4 Lecture intégrale (${completedBatches}/${preparedBatches.length} lots)...`,
+                [batch.part, { text: extractPrompt }],
+                batchInventorySchema,
+                ThinkingLevel.HIGH
+              );
+              const parsed = JSON.parse((resp.text ?? '{"pages":[]}').trim()) as {
+                pages?: BatchInventoryLike['pages'];
+              };
+              completedBatches += 1;
+              setStage(
+                `1/4 Lecture intégrale (${completedBatches}/${preparedBatches.length}) : ${batch.batchLabel}`
+              );
+              return {
+                batchIndex: batch.batchIndex,
+                batchLabel: batch.batchLabel,
+                pages: Array.isArray(parsed.pages) ? parsed.pages : [],
+              };
+            }
+          );
+
+          const totalExtractedFacts = batchInventories.reduce(
+            (sum, b) =>
+              sum + b.pages.reduce((pSum, pg) => pSum + (pg.keyFactsAndConcepts?.length || 0), 0),
+            0
+          );
+          const extractedDiagramNotes = batchInventories.flatMap((b) =>
+            b.pages.flatMap((pg) => pg.diagramsFound || [])
+          );
+          const inventoryText = serializeBatchInventoryForPrompt(batchInventories);
+
+          // =========================================================================
+          // STAGE 2 : ADAPTIVE MULTI-CARD COVERAGE PLAN
+          // =========================================================================
+          const targetCardCount = computeTargetCardCount(
+            totalKnownPages,
+            totalExtractedFacts,
+            cardCount
+          );
+
+          const stage2Label = `2/4 Planification exhaustive sur ${targetCardCount} fiche(s) R/V (${totalExtractedFacts} notions relevées)...`;
+          setStage(stage2Label);
+
+          const planPrompt = `
+Tu dois répartir L'INTÉGRALITÉ du relevé ci-dessous (${totalKnownPages} pages analysées, ${totalExtractedFacts} faits/notions relevés) en EXACTEMENT ${targetCardCount} fiche(s) recto-verso 14 × 19 cm.
+Matière : ${subject} | Classe : ${className} | Sujet : ${topic}
+Sources : ${sourceNames.join(', ')}
+
+RELEVÉ COMPLET EXTRAIT DES PDF :
+---
+${inventoryText}
+---
+
+RÈGLES STRICTES DE PLANIFICATION :
+1. "cardsPlan" DOIT contenir EXACTEMENT ${targetCardCount} élément(s), suivant la progression logique du cours (chronologique ou thématique).
+2. Répartis les notions essentielles, dates, acteurs, mécanismes, définitions et exemples clés dans "assignedFactsVerbatim" sans surcharger une seule fiche (vise un équilibre naturel entre les fiches).
+3. Indique dans "assignedBatchIndices" les numéros de lots (0-based, entre 0 et ${Math.max(0, preparedBatches.length - 1)}) correspondant à chaque fiche.
+4. Précise un plan structuré et aéré pour "rectoOutline" (parties I. et II.) et "versoOutline" (parties III. et IV. À retenir / Vocabulaire / Schéma / Tableau) visant **88 à 95 %** de remplissage par face (jamais de vide en bas de page ni de dépassement).
+5. Active "shouldIncludeDiagram": true sur les fiches où un mécanisme, axe littéraire ou organigramme clé figure dans les sources, et "shouldIncludeTable": true dès qu'un tableau comparatif ou chronologique synthétique (3 colonnes, 3–5 lignes) clarifie des œuvres, auteurs, périodes ou notions.
+`;
+          const planResp = await callGeminiJson(
+            stage2Label,
+            [{ text: planPrompt }],
+            coveragePlanSchema,
+            ThinkingLevel.MEDIUM
+          );
+          const planData = JSON.parse((planResp.text ?? '{"cardsPlan":[]}').trim()) as {
+            deckTitle?: string;
+            keyVisualSchemas?: string[];
+            verificationNotes?: string;
+            cardsPlan?: Array<{
+              title?: string;
+              generatedPrompt?: string;
+              assignedBatchIndices?: number[];
+              focusTopics?: string[];
+              rectoOutline?: string;
+              versoOutline?: string;
+              assignedFactsVerbatim?: string[];
+              shouldIncludeDiagram?: boolean;
+              diagramDescription?: string;
+              shouldIncludeTable?: boolean;
+            }>;
+          };
+
+          let cardsPlan = Array.isArray(planData.cardsPlan) ? planData.cardsPlan.slice(0, targetCardCount) : [];
+          while (cardsPlan.length < targetCardCount) {
+            const idx = cardsPlan.length;
+            const fallbackBatchIdx = Math.min(preparedBatches.length - 1, idx);
+            cardsPlan.push({
+              title: `${topic} — Partie ${idx + 1}`,
+              generatedPrompt: `Rédige la fiche ${idx + 1} sur ${topic}.`,
+              assignedBatchIndices: fallbackBatchIdx >= 0 ? [fallbackBatchIdx] : [],
+              focusTopics: [topic],
+              rectoOutline: 'I. Notions et contexte | II. Mécanismes et faits majeurs',
+              versoOutline: 'III. Approfondissement et exemples | IV. Vocabulaire / Schéma-bilan',
+              assignedFactsVerbatim: [],
+              shouldIncludeDiagram: false,
+            });
+          }
+
+          // Guard against dropped facts: attach any missed fact lines evenly across cards
+          const uncoveredFacts = collectUncoveredFactLines(
+            batchInventories,
+            cardsPlan.map((c) => c.assignedFactsVerbatim || [])
+          );
+          if (uncoveredFacts.length > 0 && cardsPlan.length > 0) {
+            uncoveredFacts.forEach((factLine, fIdx) => {
+              const target = cardsPlan[fIdx % cardsPlan.length];
+              target.assignedFactsVerbatim = [...(target.assignedFactsVerbatim || []), factLine];
+            });
+          }
+
+          // =========================================================================
+          // STAGE 3 : DEEP CARD-BY-CARD AUTHORING (MAX DENSITY + ZERO OMISSION)
+          // =========================================================================
+          interface RawGeneratedCard {
+            title: string;
+            generatedPrompt: string;
+            leftSide: { sections: Record<string, unknown>[] };
+            rightSide: { sections: Record<string, unknown>[] };
+          }
+
+          let authoredCount = 0;
+          const stage3BaseLabel = `3/4 Rédaction approfondie des fiches (0/${cardsPlan.length})...`;
+          setStage(stage3BaseLabel);
+
+          const rawCards = await runWithConcurrency(cardsPlan, 2, async (cPlan, idx) => {
+            const relevantIndices = selectRelevantBatchIndices(
+              cPlan.assignedBatchIndices || [],
+              preparedBatches.length,
+              3
+            );
+            const relevantPdfParts = relevantIndices.map((bi) => preparedBatches[bi].part);
+            const relevantBatchesText = serializeBatchInventoryForPrompt(
+              relevantIndices.map((bi) => batchInventories[bi]).filter(Boolean)
+            );
+            const assignedFactsText = (cPlan.assignedFactsVerbatim || [])
+              .map((f, fi) => `${fi + 1}. ${f}`)
+              .join('\n');
+
+            const cardPrompt = `
+Rédige UNIQUEMENT la FICHE N°${idx + 1}/${cardsPlan.length} : "${cPlan.title || topic}" (format 14 × 19 cm Recto + Verso).
+Tu disposes des extraits PDF sources correspondants ET de l'intégralité des faits assignés à cette fiche.
 
 MÉTA-PROMPT DE L'ÉLÈVE :
 ---
 ${metaPrompt}
 ---
 PARAMÈTRES :
-- Classe : ${className}
-- Matière : ${subject}
-- Sujet / Chapitre : ${topic}
-- Nombre de fiches souhaité : ${
-            cardCount === 'auto'
-              ? 'Automatique et complet : si le cours + manuel couvre plusieurs séances/thèmes (4+ grandes notions), génère 2 ou 3 fiches pour couvrir 100 % du contenu sans rien sacrifier ; 1 seule fiche uniquement si le document est très court.'
-              : `${cardCount} fiche(s) exactement`
-          }
+- Classe : ${className} | Matière : ${subject} | Chapitre : ${topic}
 ${extraInstructions ? `- Consignes complémentaires : ${extraInstructions}` : ''}
 
-PROCÉDURE OBLIGATOIRE DANS LE JSON :
-1. D'abord, remplis "extractedSections" : dresse l'inventaire COMPLET page par page (ex: "PDF 1 - Page 1 : ...") de chaque titre, notion, date, formule, tableau et passage manuscrit présent dans les PDF.
-2. Ensuite, remplis "keyVisualSchemas" : liste les mécanismes, organisations institutionnelles, chronologies ou comparaisons qui méritent un schéma vectoriel ou un tableau.
-3. Ensuite, rédige "cards" en vérifiant que 100 % de "extractedSections" est couvert dans les fiches :
-   - Chaque fiche comporte 2 côtés 14 × 19 cm : leftSide = RECTO (~50 % du contenu, parties I et II) et rightSide = VERSO (~50 % du contenu, parties III et IV / À retenir / Schéma ou Tableau).
-   - Environ 1100 à 1450 caractères par côté, phrases denses, précises et mémorisables.
-   - Balisage dans "text" :
-     * [rouge]mot-clé, date, formule ou notion cruciale[/rouge]
-     * __Amorce :__ pour souligner le titre d'une puce (évite de mettre [rouge]...[/rouge] à l'intérieur de __...__, écris plutôt __Amorce :__ [rouge]date/mot[/rouge]).
-     * **gras** ou *italique* si utile.
-   - RÈGLE OBLIGATOIRE POUR LES SCHÉMAS VECTORIELS ("diagram") :
-     Dès qu'un thème comporte un mécanisme, des institutions politiques, une chaîne cause → conséquence ou une chronologie, inclus un bloc "diagram" COMPLET avec 3 à 6 "nodes" et au moins 2 "edges".
-     INTERDIT ABSOLU de renvoyer "nodes": [] dans un bloc "diagram" !
-     Exemple EXACT :
-     {"type":"diagram","title":"Institutions de la République","nodes":[{"id":"n1","label":"Citoyens (Comices)","sublabel":"Votent lois et élisent","x":50,"y":18,"width":40,"tone":"blue"},{"id":"n2","label":"Consuls & Magistrats","sublabel":"Exécutif (1 an, veto)","x":28,"y":55,"width":38,"tone":"amber"},{"id":"n3","label":"Sénat","sublabel":"Conseil à vie","x":72,"y":55,"width":34,"tone":"red"}],"edges":[{"from":"n1","to":"n2","label":"élisent"},{"from":"n3","to":"n2","label":"conseille","dashed":true}]}
-     "tone" doit être EXCLUSIVEMENT : "blue", "amber", "green", "red", "slate".
-4. Dans "verificationNotes", résume quelles pages/sources ont été vérifiées et signale tout passage manuscrit flou éventuel.
+PLAN ASSIGNÉ POUR CETTE FICHE :
+- Sujets ciblés : ${(cPlan.focusTopics || []).join(' ; ')}
+- Plan RECTO (leftSide) : ${cPlan.rectoOutline || 'Parties I. et II.'}
+- Plan VERSO (rightSide) : ${cPlan.versoOutline || 'Parties III. et IV.'}
+${cPlan.shouldIncludeDiagram ? `- SCHÉMA VECTORIEL REQUIS ("diagram") : ${cPlan.diagramDescription || 'Schéma de synthèse clair avec 4 à 7 nœuds et flèches.'}` : ''}
+${cPlan.shouldIncludeTable ? '- TABLEAU REQUIS ("table") : Inclus un tableau comparatif ou chronologique synthétique.' : ''}
+
+FAITS, DATES, ACTEURS, DÉFINITIONS ET EXEMPLES À INTÉGRER À 100 % (ZÉRO OUBLI) :
+${assignedFactsText || relevantBatchesText}
+
+RELEVÉ DÉTAILLÉ DES LOTS SOURCES :
+${relevantBatchesText}
+
+EXIGENCES STRICTES DE SYNTHÈSE AÉRÉE ET DE PLEINE PAGE (14 × 19 CM) :
+1. **SYNTHÈSE HAUT RENDEMENT — PLEINE PAGE (88–95 % PAR FACE, ZÉRO VIDE EN BAS ET ZÉRO DÉPASSEMENT)** :
+   - Interdiction absolue de laisser un tiers ou un quart de page vide en bas ! Développe chaque notion clé avec ses exemples, citations brèves, procédés, dates et enjeux précis pour occuper tout l'espace utile.
+   - Interdiction aussi de coller des pavés bruts de 5–8 lignes par puce : **synthétise** chaque idée en puces nettes de **1 à 3 lignes maximum** (max ~170–230 caractères par puce). Quand un thème comporte plusieurs détails, décompose-le en 1 amorce level 1 courte + 2–3 sous-puces level 2 concises.
+   - **RECTO (leftSide)** : vise **1 950 à 2 350 caractères** sans schéma (ou **1 300 à 1 650 car.** si un schéma ou tableau figure sur le Recto).
+   - **VERSO (rightSide)** : vise **2 000 à 2 450 caractères** sans schéma/tableau (ou **1 350 à 1 700 car.** si un schéma ou tableau figure sur le Verso).
+   - NE DÉBORDE JAMAIS de la page 14 × 19 cm !
+2. **STRUCTURE** : Numérote toujours avec un point : "I.", "II." sur le Recto ; "III.", "IV." sur le Verso (ou "1.", "2.", "3.", "4." avec "isSubHeader": true). Termine souvent le Verso par un bloc "vocabList" (4–5 termes concis), "table" (3 colonnes, 3–5 lignes comparant œuvres/auteurs/notions/repères) ou "diagram". En Français/Histoire, un court "table" comparatif ou "diagram" structurant enrichit fortement la fiche.
+3. **TYPOGRAPHIE & SURLIGNAGE FIDÈLES** :
+   - Utilise __Amorce :__ pour souligner le titre court de chaque puce avant les deux points (ex: "__Rousseau, Les Confessions (1782) :__ 1re autobiographie moderne..."). Évite d'imbriquer des astérisques *...* à l'intérieur de __...__ (place les titres d'œuvres en *italique* juste après le titre souligné, ou simplement en texte souligné propre).
+   - INTERDIT de ne mettre en [rouge] que des chiffres ou dates isolés (évite "[rouge]-509[/rouge]"). Mets en [rouge]...[/rouge] les **notions, définitions, procédés, causes/effets ou événements datés clés** (3 à 8 mots par bloc rouge, 1 max par puce).
+   - Mets les acteurs, auteurs, lieux et notions secondaires en **gras**.
+4. **SCHÉMA VECTORIEL COMPACT ("diagram")** : Privilégie un schéma **équilibré et peu haut** (2 colonnes parallèles ou 3 paliers horizontaux max, 4 à 6 "nodes", x entre 22 et 78, y entre 12 et 88, libellé <= 24 car., sous-libellé <= 24 car.), au moins 2 "edges", et "groups" si deux compartiments existent. JAMAIS "nodes": [].
+5. **TABLEAU SYNTHÉTIQUE ("table")** : Si un tableau est inclus, garde 3 colonnes max, 3 à 5 lignes max, avec des repères courts en 1re/2e colonne (ex: "Rousseau (1782)") et des synthèses brèves en dernière colonne.
 `;
-
-          const cardsResponse = await generateWithRetry(
-            mainStageLabel,
-            unifiedPrompt,
-            cardsResponseSchema,
-            ThinkingLevel.LOW,
-            true
-          );
-
-          setStage('2/2 Vérification des schémas & équilibrage 14 × 19 cm...');
-
-          let cardsData: {
-            extractedSections?: string[];
-            keyVisualSchemas?: string[];
-            deckTitle?: string;
-            verificationNotes?: string;
-            cards: {
-              title: string;
-              generatedPrompt: string;
-              leftSide: { sections: Record<string, unknown>[] };
-              rightSide: { sections: Record<string, unknown>[] };
-            }[];
-          };
-          try {
-            cardsData = JSON.parse((cardsResponse.text ?? '{"cards":[]}').trim());
-          } catch (parseErr) {
-            const finishReason = cardsResponse.candidates?.[0]?.finishReason;
-            console.error(
-              `[/api/generate-fiches job ${jobId}] JSON parse error (finishReason=${finishReason}):`,
-              parseErr
+            const cardResp = await callGeminiJson(
+              `3/4 Rédaction fiche ${idx + 1}/${cardsPlan.length}...`,
+              [...relevantPdfParts, { text: cardPrompt }],
+              singleCardSchema,
+              ThinkingLevel.HIGH
             );
-            throw new Error(
-              finishReason === 'MAX_TOKENS'
-                ? 'La synthèse générée était trop longue pour tenir dans la réponse. Essayez en sélectionnant « 1 » ou « 2 » fiches.'
-                : 'Le modèle a renvoyé une structure incomplète. Réessayez ou réduisez le nombre de fiches.'
+            const parsedCard = JSON.parse((cardResp.text ?? '{}').trim()) as RawGeneratedCard;
+            authoredCount += 1;
+            setStage(
+              `3/4 Rédaction approfondie terminée (${authoredCount}/${cardsPlan.length})...`
             );
-          }
+            return parsedCard;
+          });
 
-          const extractedSections = Array.isArray(cardsData.extractedSections)
-            ? cardsData.extractedSections.filter((s) => typeof s === 'string' && s.trim())
-            : [];
-          const keyVisualSchemas = Array.isArray(cardsData.keyVisualSchemas)
-            ? cardsData.keyVisualSchemas.filter((s) => typeof s === 'string' && s.trim())
-            : [];
-          const plannedPrompts: PlannedPrompt[] = (cardsData.cards || []).map((c, idx) => ({
-            title: c.title || `${topic} (${idx + 1})`,
-            promptText: c.generatedPrompt || `Rédige une fiche synthétique sur ${c.title || topic}.`,
+          // =========================================================================
+          // STAGE 4 : FULL-PAGE DENSITY AUDIT & TARGETED AUTO-EXPANSION
+          // =========================================================================
+          setStage('4/4 Audit de densité pleine page & complétude...');
+
+          const sanitizeSideSections = (
+            rawSecs: Record<string, unknown>[] | undefined,
+            prefix: string,
+            cardIdx: number
+          ) =>
+            (rawSecs || []).map((s, sIdx) => ({
+              id: typeof s.id === 'string' && s.id ? s.id : `${prefix}-s-${cardIdx}-${sIdx}`,
+              romanNumeral: normalizeRomanNumeral(String(s.romanNumeral || `${sIdx + 1}.`)),
+              title: String(s.title || 'Section'),
+              isSubHeader: Boolean(s.isSubHeader),
+              blocks: sanitizeGeneratedBlocks(
+                Array.isArray(s.blocks) ? (s.blocks as Record<string, unknown>[]) : [],
+                `${prefix}-${cardIdx}-${sIdx}`
+              ),
+            }));
+
+          const expandedRawCards = await runWithConcurrency(rawCards, 2, async (rawCard, idx) => {
+            const leftClean = { sections: sanitizeSideSections(rawCard.leftSide?.sections, 'l', idx) };
+            const rightClean = { sections: sanitizeSideSections(rawCard.rightSide?.sections, 'r', idx) };
+            const leftD = estimateSideDensity(leftClean, 9.2, 1.35, 'recto');
+            const rightD = estimateSideDensity(rightClean, 9.2, 1.35, 'verso');
+
+            const hasOverflow = leftD.utilizationPercent > 97 || rightD.utilizationPercent > 97;
+            const hasUnderfill = leftD.utilizationPercent < 86 || rightD.utilizationPercent < 86;
+
+            if (!hasOverflow && !hasUnderfill) {
+              return rawCard;
+            }
+
+            try {
+              const cPlan = cardsPlan[idx];
+              const relevantIndices = selectRelevantBatchIndices(
+                cPlan?.assignedBatchIndices || [],
+                preparedBatches.length,
+                2
+              );
+              const relevantBatchesText = serializeBatchInventoryForPrompt(
+                relevantIndices.map((bi) => batchInventories[bi]).filter(Boolean)
+              );
+
+              if (hasOverflow) {
+                setStage(
+                  `4/4 Aération & équilibrage anti-dépassement fiche ${idx + 1}/${rawCards.length} (R: ${leftD.utilizationPercent}%, V: ${rightD.utilizationPercent}%)...`
+                );
+                const condensePrompt = `
+Cette fiche 14 × 19 cm DÉBORDE ou est TROP SURCHARGÉE / COLLÉE :
+- RECTO actuel (leftSide) : ${leftD.utilizationPercent}% (${leftD.estimatedChars} caractères) — CIBLE IMPÉRATIVE : **88% à 94%** (<= 96%).
+- VERSO actuel (rightSide) : ${rightD.utilizationPercent}% (${rightD.estimatedChars} caractères) — CIBLE IMPÉRATIVE : **88% à 94%** (<= 96%).
+
+MISSION DE SYNTHÈSE AÉRÉE :
+1. Garde 100 % des notions essentielles, dates, acteurs, formules, tableaux et schémas importants.
+2. Remplace les longs pavés de prose (4–8 lignes) par des **puces synthétiques claires et respirantes de 1 à 3 lignes max** (supprime les redites, périphrases et énumérations accessoires sans intérêt).
+3. Rééquilibre au besoin les sections entre Recto (leftSide) et Verso (rightSide) pour que AUCUNE face ne dépasse 96 % et qu'aucun titre ne soit coupé en bas de page.
+4. Si un schéma est très vertical ou verbeux, garde ses libellés courts (<= 22 car.) et 4–6 nœuds max.
+
+FICHE ACTUELLE À AÉRER (JSON) :
+${JSON.stringify(rawCard)}
+`;
+                const condResp = await callGeminiJson(
+                  `4/4 Aération fiche ${idx + 1}/${rawCards.length}...`,
+                  [{ text: condensePrompt }],
+                  singleCardSchema,
+                  ThinkingLevel.MEDIUM
+                );
+                const condensed = JSON.parse((condResp.text ?? '{}').trim()) as RawGeneratedCard;
+                if (condensed.leftSide?.sections?.length && condensed.rightSide?.sections?.length) {
+                  return condensed;
+                }
+                return rawCard;
+              }
+
+              setStage(
+                `4/4 Équilibrage fiche ${idx + 1}/${rawCards.length} (R: ${leftD.utilizationPercent}%, V: ${rightD.utilizationPercent}%)...`
+              );
+              const expandPrompt = `
+Cette fiche 14 × 19 cm laisse du vide en bas d'au moins une face :
+- RECTO actuel (leftSide) : ${leftD.utilizationPercent}% (${leftD.estimatedChars} caractères) — OBJECTIF : **89% à 95%** (STRICTEMENT <= 96%, zéro vide en bas de page !).
+- VERSO actuel (rightSide) : ${rightD.utilizationPercent}% (${rightD.estimatedChars} caractères) — OBJECTIF : **89% à 95%** (STRICTEMENT <= 96%, zéro vide en bas de page !).
+
+MISSION : Conserve tout le contenu déjà rédigé et enrichis UNIQUEMENT le côté < 88% en y ajoutant des exemples/citations clés, des sous-puces analytiques courtes (1–3 lignes max par puce), des définitions ("vocabList"), ou un bref tableau récapitulatif ("table" 3 colonnes, 3–4 lignes) / schéma compact tirés des sources ci-dessous, pour remplir la page 14 × 19 cm sans jamais dépasser 96 %.
+
+FICHE ACTUELLE (JSON) :
+${JSON.stringify(rawCard)}
+
+FAITS ET SOURCES DISPONIBLES :
+${(cPlan?.assignedFactsVerbatim || []).join('\n')}
+
+EXTRAITS DU RELEVÉ :
+${relevantBatchesText}
+`;
+              const expResp = await callGeminiJson(
+                `4/4 Équilibrage fiche ${idx + 1}/${rawCards.length}...`,
+                [{ text: expandPrompt }],
+                singleCardSchema,
+                ThinkingLevel.MEDIUM
+              );
+              const expanded = JSON.parse((expResp.text ?? '{}').trim()) as RawGeneratedCard;
+              if (expanded.leftSide?.sections?.length && expanded.rightSide?.sections?.length) {
+                return expanded;
+              }
+            } catch (expErr) {
+              console.warn(
+                `[/api/generate-fiches job ${jobId}] Stage 4 balance skipped for card ${idx + 1}:`,
+                expErr
+              );
+            }
+            return rawCard;
+          });
+
+          const plannedPrompts: PlannedPrompt[] = expandedRawCards.map((c, idx) => ({
+            title: c.title || cardsPlan[idx]?.title || `${topic} (${idx + 1})`,
+            promptText:
+              c.generatedPrompt ||
+              cardsPlan[idx]?.generatedPrompt ||
+              `Rédige une fiche synthétique sur ${c.title || topic}.`,
           }));
 
-          // Pass 2.5 (lightweight text-grounded): synthesize nodes/edges if any diagram came back empty
+          // Pass 4b (text-grounded): synthesize nodes/edges/groups if any diagram came back empty
           const diagramRequests: Array<{
             targetKey: string;
             cardIdx: number;
@@ -971,7 +1434,7 @@ PROCÉDURE OBLIGATOIRE DANS LE JSON :
           }> = [];
           let totalPopulatedDiagrams = 0;
 
-          (cardsData.cards || []).forEach((c, cIdx) => {
+          expandedRawCards.forEach((c, cIdx) => {
             (['leftSide', 'rightSide'] as const).forEach((sideKey) => {
               const secs = c[sideKey]?.sections || [];
               secs.forEach((sec, sIdx) => {
@@ -1001,13 +1464,17 @@ PROCÉDURE OBLIGATOIRE DANS LE JSON :
             });
           });
 
+          const keyVisualSchemas = Array.isArray(planData.keyVisualSchemas)
+            ? planData.keyVisualSchemas.filter((s) => typeof s === 'string' && s.trim())
+            : [];
+
           if (
             diagramRequests.length === 0 &&
             totalPopulatedDiagrams === 0 &&
-            keyVisualSchemas.length > 0 &&
-            (cardsData.cards || []).length > 0
+            (keyVisualSchemas.length > 0 || extractedDiagramNotes.length > 0) &&
+            expandedRawCards.length > 0
           ) {
-            const firstCard = cardsData.cards[0];
+            const firstCard = expandedRawCards[0];
             const targetSide =
               (firstCard.rightSide?.sections?.length ?? 0) > 0 ? 'rightSide' : 'leftSide';
             const secs = firstCard[targetSide]?.sections || [];
@@ -1016,8 +1483,8 @@ PROCÉDURE OBLIGATOIRE DANS LE JSON :
               const blks = Array.isArray(secs[secIdx].blocks)
                 ? (secs[secIdx].blocks as Record<string, unknown>[])
                 : [];
-              const newBlk = { type: 'diagram', title: keyVisualSchemas[0], nodes: [], edges: [] };
-              blks.push(newBlk);
+              const diagTitle = keyVisualSchemas[0] || extractedDiagramNotes[0];
+              blks.push({ type: 'diagram', title: diagTitle, nodes: [], edges: [] });
               secs[secIdx].blocks = blks;
               diagramRequests.push({
                 targetKey: `0-${targetSide}-${secIdx}-${blks.length - 1}`,
@@ -1025,7 +1492,7 @@ PROCÉDURE OBLIGATOIRE DANS LE JSON :
                 side: targetSide,
                 secIdx,
                 blkIdx: blks.length - 1,
-                title: keyVisualSchemas[0],
+                title: diagTitle,
                 contextTitle: String(firstCard.title || topic),
               });
             }
@@ -1033,28 +1500,29 @@ PROCÉDURE OBLIGATOIRE DANS LE JSON :
 
           if (diagramRequests.length > 0) {
             try {
-              setStage('2/2 Génération dédiée des schémas vectoriels...');
+              setStage('4/4 Finalisation des schémas vectoriels...');
               const repairPrompt = `
 À partir uniquement des notions vérifiées du cours ci-dessous, construis les schémas vectoriels manquants demandés.
-NOTIONS VÉRIFIÉES DU COURS :
-${extractedSections.join('\n') || topic}
+NOTIONS ET SCHÉMAS EXTRAITS DU COURS :
+${inventoryText || topic}
 
-Chaque schéma DOIT avoir entre 3 et 6 "nodes" non vides et au moins 2 "edges" utilisant les "id" exacts des nodes.
-Coordonnées sur une grille propre sans chevauchement : x entre 20 et 80, y entre 18 et 84, width entre 28 et 42.
-tone autorisés : "blue", "amber", "green", "red", "slate".
-Libellés courts (<= 26 caractères).
+RÈGLES DE CONSTRUCTION :
+- Chaque schéma DOIT être **large et compact** : 4 à 6 "nodes" max et au moins 2 "edges" utilisant les "id" exacts des nodes.
+- Coordonnées sur une grille horizontale ou en 2 colonnes équilibrées : x entre 24 et 76, y entre 14 et 86, width entre 30 et 44.
+- Ajoute "groups" si deux colonnes parallèles / compartiments existent.
+- tone autorisés : "blue", "amber", "green", "red", "slate".
+- Libellés très concis (<= 24 caractères).
 
 Schémas à générer :
 ${diagramRequests
   .map((r) => `- targetKey: "${r.targetKey}" | Fiche: "${r.contextTitle}" | Titre schéma: "${r.title}"`)
   .join('\n')}
 `;
-              const repairResp = await generateWithRetry(
-                mainStageLabel,
-                repairPrompt,
+              const repairResp = await callGeminiJson(
+                '4/4 Finalisation des schémas vectoriels...',
+                [{ text: repairPrompt }],
                 diagramRepairSchema,
-                ThinkingLevel.LOW,
-                false
+                ThinkingLevel.LOW
               );
               const repaired = JSON.parse((repairResp.text ?? '{"diagrams":[]}').trim()) as {
                 diagrams?: Array<{
@@ -1063,6 +1531,7 @@ ${diagramRequests
                   footnote?: string;
                   nodes: unknown[];
                   edges: unknown[];
+                  groups?: unknown[];
                 }>;
               };
               const byKey = new Map(
@@ -1071,7 +1540,7 @@ ${diagramRequests
               for (const reqInfo of diagramRequests) {
                 const match = byKey.get(reqInfo.targetKey);
                 if (match && Array.isArray(match.nodes) && match.nodes.length > 0) {
-                  const secObj = cardsData.cards[reqInfo.cardIdx]?.[reqInfo.side]?.sections?.[
+                  const secObj = expandedRawCards[reqInfo.cardIdx]?.[reqInfo.side]?.sections?.[
                     reqInfo.secIdx
                   ];
                   const secBlocks = Array.isArray(secObj?.blocks)
@@ -1082,6 +1551,9 @@ ${diagramRequests
                     targetBlk.title = match.title || reqInfo.title;
                     targetBlk.nodes = match.nodes;
                     targetBlk.edges = Array.isArray(match.edges) ? match.edges : [];
+                    if (Array.isArray(match.groups) && match.groups.length > 0) {
+                      targetBlk.groups = match.groups;
+                    }
                     if (match.footnote) targetBlk.footnote = match.footnote;
                   }
                 }
@@ -1094,7 +1566,7 @@ ${diagramRequests
           const palette = SUBJECT_PALETTES[subject];
           const nowIso = new Date().toISOString();
 
-          const cards: FicheCard[] = (cardsData.cards || []).map((c, idx) => {
+          const cards: FicheCard[] = expandedRawCards.map((c, idx) => {
             const rawCard: FicheCard = {
               id: `card-${Date.now()}-${idx}`,
               index: idx + 1,
@@ -1105,31 +1577,14 @@ ${diagramRequests
               generatedPrompt: c.generatedPrompt || plannedPrompts[idx]?.promptText,
               backgroundHex: palette.backgroundHex,
               visualStyle,
-              fontSizePt: 8.8,
-              lineHeight: 1.3,
+              fontSizePt: 9.2,
+              lineHeight: 1.35,
+              autoFillHeight: true,
               leftSide: {
-                sections: (c.leftSide?.sections || []).map((s, sIdx) => ({
-                  id: typeof s.id === 'string' && s.id ? s.id : `l-s-${idx}-${sIdx}`,
-                  romanNumeral: String(s.romanNumeral || `${sIdx + 1}.`),
-                  title: String(s.title || 'Section'),
-                  isSubHeader: Boolean(s.isSubHeader),
-                  blocks: sanitizeGeneratedBlocks(
-                    Array.isArray(s.blocks) ? (s.blocks as Record<string, unknown>[]) : [],
-                    `l-${idx}-${sIdx}`
-                  ),
-                })),
+                sections: sanitizeSideSections(c.leftSide?.sections, 'l', idx),
               },
               rightSide: {
-                sections: (c.rightSide?.sections || []).map((s, sIdx) => ({
-                  id: typeof s.id === 'string' && s.id ? s.id : `r-s-${idx}-${sIdx}`,
-                  romanNumeral: String(s.romanNumeral || `${sIdx + 1}.`),
-                  title: String(s.title || 'Section'),
-                  isSubHeader: Boolean(s.isSubHeader),
-                  blocks: sanitizeGeneratedBlocks(
-                    Array.isArray(s.blocks) ? (s.blocks as Record<string, unknown>[]) : [],
-                    `r-${idx}-${sIdx}`
-                  ),
-                })),
+                sections: sanitizeSideSections(c.rightSide?.sections, 'r', idx),
               },
             };
             return rebalanceCardLayout(rawCard);
@@ -1143,14 +1598,16 @@ ${diagramRequests
             return;
           }
 
-          const sourceNames = [
-            ...preUploadedFiles.map((pf) => pf.displayName || 'document.pdf'),
-            ...bufferedFiles.map((f) => ensurePdfFilename(f.originalname)),
-          ];
+          const extractedSections = batchInventories.flatMap((b) =>
+            b.pages.map(
+              (pg) =>
+                `${pg.pageRef}: ${(pg.headings || []).join(' · ') || `${pg.keyFactsAndConcepts.length} notions`}`
+            )
+          );
 
           const deck: FicheDeck = {
             id: `deck-${Date.now()}`,
-            title: cardsData.deckTitle || cards[0].title,
+            title: planData.deckTitle || cards[0].title,
             className,
             subject,
             dateLabel,
@@ -1160,7 +1617,9 @@ ${diagramRequests
             verification: {
               sourcesAnalyzed: sourceNames,
               extractedSections,
-              notes: cardsData.verificationNotes || undefined,
+              notes:
+                planData.verificationNotes ||
+                `${totalKnownPages} pages analysées par lots de 5 pages (${totalExtractedFacts} notions extraites sur ${cards.length} fiche(s) R/V).`,
             },
             createdAt: nowIso,
             updatedAt: nowIso,
@@ -1181,6 +1640,9 @@ ${diagramRequests
           job.error = formatUserFriendlyError(err);
           job.updatedAt = Date.now();
         } finally {
+          for (const cacheId of consumedLocalCacheIds) {
+            uploadedPdfBufferCache.delete(cacheId);
+          }
           if (geminiFileNamesToCleanup.length > 0) {
             await Promise.allSettled(
               geminiFileNamesToCleanup.map((name) => ai.files.delete({ name }))

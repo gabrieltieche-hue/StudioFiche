@@ -24,6 +24,7 @@ import type {
 } from '../types/fiche';
 import {
   buildCompiledMetaPrompt,
+  computeAutoSideTypography,
   estimateSideDensity,
   formatDateShort,
   parseDeckFromJsonInput,
@@ -64,7 +65,7 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
   const [subject, setSubject] = useState<SubjectKey>(activeDeck?.subject || 'SVT');
   const [dateLabel, setDateLabel] = useState(formatDateShort());
   const [topic, setTopic] = useState('');
-  const [cardCount, setCardCount] = useState<'auto' | '1' | '2' | '3'>('auto');
+  const [cardCount, setCardCount] = useState<'auto' | '1' | '2' | '3' | '4'>('auto');
   const [selectedPresetId, setSelectedPresetId] = useState(presets[0]?.id || '');
   const [extraInstructions, setExtraInstructions] = useState('');
 
@@ -92,20 +93,45 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
     return activeDeck.cards[safeIdx];
   }, [activeDeck, activeCardIndex]);
 
-  const leftDensity = useMemo(
-    () =>
-      currentCard
-        ? estimateSideDensity(currentCard.leftSide, currentCard.fontSizePt, currentCard.lineHeight)
-        : null,
-    [currentCard]
-  );
-  const rightDensity = useMemo(
-    () =>
-      currentCard
-        ? estimateSideDensity(currentCard.rightSide, currentCard.fontSizePt, currentCard.lineHeight)
-        : null,
-    [currentCard]
-  );
+  const isAutoFill = currentCard?.autoFillHeight !== false;
+
+  const leftDensity = useMemo(() => {
+    if (!currentCard) return null;
+    if (isAutoFill) {
+      const auto = computeAutoSideTypography(
+        currentCard.leftSide,
+        currentCard.fontSizePt,
+        currentCard.lineHeight,
+        'recto'
+      );
+      return estimateSideDensity(currentCard.leftSide, auto.fontSizePt, auto.lineHeight, 'recto');
+    }
+    return estimateSideDensity(
+      currentCard.leftSide,
+      currentCard.fontSizePt,
+      currentCard.lineHeight,
+      'recto'
+    );
+  }, [currentCard, isAutoFill]);
+
+  const rightDensity = useMemo(() => {
+    if (!currentCard) return null;
+    if (isAutoFill) {
+      const auto = computeAutoSideTypography(
+        currentCard.rightSide,
+        currentCard.fontSizePt,
+        currentCard.lineHeight,
+        'verso'
+      );
+      return estimateSideDensity(currentCard.rightSide, auto.fontSizePt, auto.lineHeight, 'verso');
+    }
+    return estimateSideDensity(
+      currentCard.rightSide,
+      currentCard.fontSizePt,
+      currentCard.lineHeight,
+      'verso'
+    );
+  }, [currentCard, isAutoFill]);
 
   const handleFilesSelected = async (candidates: File[]) => {
     if (candidates.length === 0) return;
@@ -252,7 +278,13 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
     item: SelectedPdfItem,
     fileIndex: number,
     totalFiles: number
-  ): Promise<{ uri: string; name: string; mimeType: string; displayName: string }> => {
+  ): Promise<{
+    uri: string;
+    name: string;
+    mimeType: string;
+    displayName: string;
+    localCacheId?: string;
+  }> => {
     const CHUNK_SIZE = 1.5 * 1024 * 1024; // 1.5 MB per HTTP request for mobile & Cloud Run reliability
     const totalChunks = Math.max(1, Math.ceil(item.file.size / CHUNK_SIZE));
     const uploadId =
@@ -308,6 +340,7 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
       name?: string;
       mimeType?: string;
       displayName?: string;
+      localCacheId?: string;
       error?: string;
     }>(completeRes, '/api/upload-pdf/complete');
 
@@ -322,6 +355,7 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
       name: completeData.name,
       mimeType: completeData.mimeType || 'application/pdf',
       displayName: completeData.displayName || item.displayName,
+      ...(completeData.localCacheId ? { localCacheId: completeData.localCacheId } : {}),
     };
   };
 
@@ -351,7 +385,13 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
       const shouldUploadViaChunks =
         totalBytes > 2.5 * 1024 * 1024 || pdfFiles.some((item) => item.file.size > 1.5 * 1024 * 1024);
 
-      const preUploadedFiles: Array<{ uri: string; name: string; mimeType: string; displayName: string }> = [];
+      const preUploadedFiles: Array<{
+        uri: string;
+        name: string;
+        mimeType: string;
+        displayName: string;
+        localCacheId?: string;
+      }> = [];
       const inlineFiles: SelectedPdfItem[] = [];
 
       if (shouldUploadViaChunks) {
@@ -363,7 +403,7 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
         inlineFiles.push(...pdfFiles);
       }
 
-      setGenerationStage('Lancement de l’analyse NotebookLM...');
+      setGenerationStage('Lancement de l’analyse intégrale page par page...');
 
       const buildGenerateBody = () => {
         const formData = new FormData();
@@ -411,9 +451,9 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
         }
 
         let consecutivePollFailures = 0;
-        const maxPollFailures = 6;
+        const maxPollFailures = 8;
         const pollStartedAt = Date.now();
-        const maxWaitMs = 4 * 60 * 1000;
+        const maxWaitMs = 8 * 60 * 1000;
 
         while (!generatedDeck) {
           if (Date.now() - pollStartedAt > maxWaitMs) {
@@ -746,8 +786,8 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Nombre de fiches (14 × 19 cm R/V)
               </label>
-              <div className="grid grid-cols-4 gap-1 bg-slate-100 p-1 rounded-lg">
-                {(['auto', '1', '2', '3'] as const).map((cnt) => (
+              <div className="grid grid-cols-5 gap-1 bg-slate-100 p-1 rounded-lg">
+                {(['auto', '1', '2', '3', '4'] as const).map((cnt) => (
                   <button
                     key={cnt}
                     type="button"
@@ -1039,9 +1079,43 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
 
             {/* Typography Density */}
             <div className="space-y-2.5 pb-3 border-b border-slate-200">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                <div>
+                  <div className="text-xs font-semibold text-slate-800">
+                    Remplissage auto pleine page
+                  </div>
+                  <div className="text-[10.5px] text-slate-500 leading-tight mt-0.5">
+                    Adapte la taille Recto / Verso séparément pour zéro vide en bas
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isAutoFill}
+                  aria-label="Remplissage auto pleine page"
+                  onClick={() =>
+                    handleUpdateCurrentCard({
+                      ...currentCard,
+                      autoFillHeight: !isAutoFill,
+                    })
+                  }
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+                    isAutoFill ? 'bg-blue-700' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                      isAutoFill ? 'translate-x-4' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
               <div>
                 <div className="flex justify-between text-xs mb-1">
-                  <span className="font-semibold text-slate-700">Taille du texte</span>
+                  <span className="font-semibold text-slate-700">
+                    {isAutoFill ? 'Taille de base' : 'Taille du texte'}
+                  </span>
                   <span className="font-mono-tabular text-slate-600">
                     {currentCard.fontSizePt.toFixed(1)} pt
                   </span>
@@ -1049,12 +1123,13 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
                 <input
                   type="range"
                   min={7.5}
-                  max={10.5}
+                  max={11.5}
                   step={0.1}
                   value={currentCard.fontSizePt}
                   onChange={(e) =>
                     handleUpdateCurrentCard({
                       ...currentCard,
+                      autoFillHeight: false,
                       fontSizePt: Number(e.target.value),
                     })
                   }
@@ -1072,12 +1147,13 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
                 <input
                   type="range"
                   min={1.15}
-                  max={1.5}
+                  max={1.55}
                   step={0.02}
                   value={currentCard.lineHeight}
                   onChange={(e) =>
                     handleUpdateCurrentCard({
                       ...currentCard,
+                      autoFillHeight: false,
                       lineHeight: Number(e.target.value),
                     })
                   }
@@ -1139,7 +1215,11 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
                 </p>
                 <button
                   type="button"
-                  onClick={() => handleUpdateCurrentCard(rebalanceCardLayout(currentCard))}
+                  onClick={() =>
+                    handleUpdateCurrentCard(
+                      rebalanceCardLayout({ ...currentCard, autoFillHeight: true })
+                    )
+                  }
                   className="w-full py-1.5 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold rounded-md transition-colors"
                 >
                   Rééquilibrer Recto / Verso auto

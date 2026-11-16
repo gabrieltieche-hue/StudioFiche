@@ -25,6 +25,7 @@ export interface SubjectPalette {
 export interface TextSpan {
   text: string;
   tone?: 'normal' | 'bold' | 'redBold' | 'underline' | 'italic';
+  italic?: boolean;
 }
 
 export interface DiagramNode {
@@ -42,6 +43,14 @@ export interface DiagramEdge {
   to: string;
   label?: string;
   dashed?: boolean;
+}
+
+export interface DiagramGroup {
+  id: string;
+  title: string;
+  subtitle?: string;
+  nodeIds: string[];
+  tone?: 'blue' | 'amber' | 'green' | 'red' | 'slate';
 }
 
 export type FicheBlock =
@@ -87,6 +96,7 @@ export type FicheBlock =
       title: string;
       nodes: DiagramNode[];
       edges: DiagramEdge[];
+      groups?: DiagramGroup[];
       footnote?: string;
     };
 
@@ -113,8 +123,9 @@ export interface FicheCard {
   generatedPrompt?: string;
   backgroundHex: string;
   visualStyle: FicheVisualStyle;
-  fontSizePt: number; // 8.0 to 11.5
-  lineHeight: number; // 1.2 to 1.55
+  fontSizePt: number; // 7.5 to 11.5
+  lineHeight: number; // 1.15 to 1.55
+  autoFillHeight?: boolean; // Automatically scale typography & spacing per side to fill 14x19cm
   leftSide: FicheSide; // Recto (14 x 19 cm)
   rightSide: FicheSide; // Verso (14 x 19 cm)
 }
@@ -157,6 +168,6 @@ export interface MetaPromptPreset {
   name: string;
   description: string;
   template: string;
-  defaultCardCount: 'auto' | '1' | '2' | '3';
+  defaultCardCount: 'auto' | '1' | '2' | '3' | '4';
   updatedAt: string;
 }

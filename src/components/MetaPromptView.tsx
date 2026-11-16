@@ -15,7 +15,7 @@ export const MetaPromptView: React.FC<MetaPromptViewProps> = ({ presets, onSaveP
   const [name, setName] = useState(selected?.name || '');
   const [description, setDescription] = useState(selected?.description || '');
   const [template, setTemplate] = useState(selected?.template || '');
-  const [defaultCardCount, setDefaultCardCount] = useState<'auto' | '1' | '2' | '3'>(
+  const [defaultCardCount, setDefaultCardCount] = useState<'auto' | '1' | '2' | '3' | '4'>(
     selected?.defaultCardCount || 'auto'
   );
   const [savedNotice, setSavedNotice] = useState(false);
@@ -167,14 +167,15 @@ export const MetaPromptView: React.FC<MetaPromptViewProps> = ({ presets, onSaveP
                 id="preset-count"
                 value={defaultCardCount}
                 onChange={(e) =>
-                  setDefaultCardCount(e.target.value as 'auto' | '1' | '2' | '3')
+                  setDefaultCardCount(e.target.value as 'auto' | '1' | '2' | '3' | '4')
                 }
                 className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:border-blue-600"
               >
-                <option value="auto">Auto (2–3 idéalement)</option>
+                <option value="auto">Auto (adapté au volume)</option>
                 <option value="1">1 fiche</option>
                 <option value="2">2 fiches</option>
                 <option value="3">3 fiches</option>
+                <option value="4">4 fiches</option>
               </select>
             </div>
           </div>
