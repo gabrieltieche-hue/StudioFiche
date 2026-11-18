@@ -217,61 +217,131 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
     setFileError(null);
   };
 
-  const parseJsonSafe = async <T,>(response: Response, endpointLabel = 'API'): Promise<T> => {
-    const rawText = await response.text();
-    const trimmed = rawText.trim();
-    const contentType = response.headers.get('content-type') || '';
-
-    try {
-      return JSON.parse(trimmed) as T;
-    } catch {
-      if (!response.ok) {
-        if (response.status === 413) {
-          throw new Error(
-            'Fichier trop volumineux pour la requête. Essayez avec un PDF plus léger.'
-          );
-        }
-        throw new Error(`Erreur serveur (${response.status}) sur ${endpointLabel}.`);
-      }
-
-      if (!trimmed) {
-        throw new Error(
-          `Réponse vide du serveur (${endpointLabel}, HTTP ${response.status}).`
-        );
-      }
-
-      if (contentType.includes('text/html') || trimmed.startsWith('<')) {
-        throw new Error(
-          `Le serveur a renvoyé une page HTML au lieu de JSON (${endpointLabel}, HTTP ${response.status}). Rechargez la page puis réessayez.`
-        );
-      }
-
-      throw new Error(
-        `Réponse serveur non-JSON (${endpointLabel}, HTTP ${response.status}) : ${trimmed.slice(0, 100)}`
-      );
+  class TransientHttpError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'TransientHttpError';
     }
-  };
+  }
 
-  const fetchWithRetry = async (
+  const fetchJsonWithRetry = async <T,>(
     url: string,
     initFactory: () => RequestInit,
-    retries = 2
-  ): Promise<Response> => {
+    options?: { retries?: number; timeoutMs?: number; endpointLabel?: string }
+  ): Promise<{ ok: boolean; status: number; data: T }> => {
+    const retries = options?.retries ?? 4;
+    const timeoutMs = options?.timeoutMs ?? 35_000;
+    const endpointLabel = options?.endpointLabel || url;
+    const backoffMs = [800, 1600, 2800, 4200];
     let lastError: unknown;
+
     for (let attempt = 0; attempt <= retries; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+
       try {
-        return await fetch(url, {
+        const init = initFactory();
+        const mergedHeaders = new Headers(init.headers);
+        if (!mergedHeaders.has('Accept')) {
+          mergedHeaders.set('Accept', 'application/json');
+        }
+        if (!mergedHeaders.has('X-Requested-With')) {
+          mergedHeaders.set('X-Requested-With', 'XMLHttpRequest');
+        }
+
+        const response = await fetch(url, {
           credentials: 'same-origin',
-          ...initFactory(),
+          cache: 'no-store',
+          ...init,
+          headers: mergedHeaders,
+          signal: controller.signal,
         });
+
+        const rawText = await response.text();
+        const trimmed = rawText.trim();
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const isTransientStatus = [429, 502, 503, 504].includes(response.status);
+        const isHtmlResponse = contentType.includes('text/html') || trimmed.startsWith('<');
+
+        if (!isHtmlResponse && trimmed) {
+          try {
+            const parsed = JSON.parse(trimmed) as T & { error?: string };
+            if (!response.ok && isTransientStatus) {
+              throw new TransientHttpError(
+                parsed?.error || `Serveur temporairement indisponible (${response.status}) sur ${endpointLabel}.`
+              );
+            }
+            return { ok: response.ok, status: response.status, data: parsed };
+          } catch (jsonErr) {
+            if (jsonErr instanceof TransientHttpError) throw jsonErr;
+            // Non-JSON non-HTML text body falls through below
+          }
+        }
+
+        if (!response.ok) {
+          if (response.status === 413) {
+            throw new Error(
+              'Fichier trop volumineux pour la requête. Essayez avec un PDF plus léger.'
+            );
+          }
+          const msg = `Erreur serveur (${response.status}) sur ${endpointLabel}.`;
+          if (isTransientStatus || isHtmlResponse) {
+            throw new TransientHttpError(msg);
+          }
+          throw new Error(msg);
+        }
+
+        if (isHtmlResponse) {
+          throw new TransientHttpError(
+            `Le serveur a renvoyé une page HTML au lieu de JSON (${endpointLabel}, HTTP ${response.status}).`
+          );
+        }
+
+        if (!trimmed) {
+          throw new TransientHttpError(
+            `Réponse vide du serveur (${endpointLabel}, HTTP ${response.status}).`
+          );
+        }
+
+        throw new TransientHttpError(
+          `Réponse serveur non-JSON (${endpointLabel}, HTTP ${response.status}) : ${trimmed.slice(0, 100)}`
+        );
       } catch (err) {
         lastError = err;
-        if (attempt < retries) {
-          await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+        const isAbort =
+          err instanceof DOMException
+            ? err.name === 'AbortError'
+            : err instanceof Error && err.name === 'AbortError';
+        const isNetwork =
+          err instanceof TypeError ||
+          (err instanceof Error &&
+            (err.message === 'Failed to fetch' || err.message.includes('NetworkError')));
+        const isTransient = err instanceof TransientHttpError || isAbort || isNetwork;
+
+        if (isAbort) {
+          lastError = new TransientHttpError(
+            `Délai d’attente dépassé (${Math.round(timeoutMs / 1000)}s) sur ${endpointLabel}.`
+          );
         }
+
+        if (isTransient && attempt < retries) {
+          const wait = backoffMs[Math.min(attempt, backoffMs.length - 1)];
+          await new Promise((r) => setTimeout(r, wait));
+          continue;
+        }
+        break;
+      } finally {
+        clearTimeout(timer);
       }
     }
-    throw lastError instanceof Error ? lastError : new Error('Erreur réseau.');
+
+    if (lastError instanceof Error) {
+      if (lastError.message.includes('HTML au lieu de JSON')) {
+        throw new Error(`${lastError.message} Rechargez la page puis réessayez.`);
+      }
+      throw lastError;
+    }
+    throw new Error('Erreur réseau.');
   };
 
   const uploadSinglePdfChunked = async (
@@ -285,7 +355,7 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
     displayName: string;
     localCacheId?: string;
   }> => {
-    const CHUNK_SIZE = 1.5 * 1024 * 1024; // 1.5 MB per HTTP request for mobile & Cloud Run reliability
+    const CHUNK_SIZE = 768 * 1024; // 768 Ko per HTTP request for proxy & mobile reliability
     const totalChunks = Math.max(1, Math.ceil(item.file.size / CHUNK_SIZE));
     const uploadId =
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -302,25 +372,28 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
         `Envoi de ${item.displayName} (${fileIndex + 1}/${totalFiles} · ${pct}%)...`
       );
 
-      const chunkRes = await fetchWithRetry('/api/upload-pdf/chunk', () => {
-        const chunkForm = new FormData();
-        chunkForm.append('uploadId', uploadId);
-        chunkForm.append('chunkIndex', String(chunkIndex));
-        chunkForm.append('totalChunks', String(totalChunks));
-        chunkForm.append('totalSize', String(item.file.size));
-        chunkForm.append('fileName', item.displayName);
-        chunkForm.append('chunk', slice, item.displayName);
-        return {
-          method: 'POST',
-          body: chunkForm,
-        };
-      });
-
-      const chunkData = await parseJsonSafe<{ ok?: boolean; error?: string }>(
-        chunkRes,
-        '/api/upload-pdf/chunk'
+      const { ok: chunkOk, data: chunkData } = await fetchJsonWithRetry<{
+        ok?: boolean;
+        error?: string;
+      }>(
+        '/api/upload-pdf/chunk',
+        () => {
+          const chunkForm = new FormData();
+          chunkForm.append('uploadId', uploadId);
+          chunkForm.append('chunkIndex', String(chunkIndex));
+          chunkForm.append('totalChunks', String(totalChunks));
+          chunkForm.append('totalSize', String(item.file.size));
+          chunkForm.append('fileName', item.displayName);
+          chunkForm.append('chunk', slice, item.displayName);
+          return {
+            method: 'POST',
+            body: chunkForm,
+          };
+        },
+        { retries: 4, timeoutMs: 35_000, endpointLabel: '/api/upload-pdf/chunk' }
       );
-      if (!chunkRes.ok || !chunkData.ok) {
+
+      if (!chunkOk || !chunkData.ok) {
         throw new Error(
           chunkData.error || `Échec d'envoi du fragment ${chunkIndex + 1}/${totalChunks}.`
         );
@@ -329,30 +402,32 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
 
     setGenerationStage(`Enregistrement de ${item.displayName}...`);
 
-    const completeRes = await fetchWithRetry('/api/upload-pdf/complete', () => ({
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uploadId }),
-    }));
-
-    const completeData = await parseJsonSafe<{
+    const { ok: completeOk, data: completeData } = await fetchJsonWithRetry<{
       uri?: string;
       name?: string;
       mimeType?: string;
       displayName?: string;
       localCacheId?: string;
       error?: string;
-    }>(completeRes, '/api/upload-pdf/complete');
+    }>(
+      '/api/upload-pdf/complete',
+      () => ({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadId }),
+      }),
+      { retries: 4, timeoutMs: 35_000, endpointLabel: '/api/upload-pdf/complete' }
+    );
 
-    if (!completeRes.ok || !completeData.uri || !completeData.name) {
+    if (!completeOk || (!completeData.uri && !completeData.localCacheId)) {
       throw new Error(
         completeData.error || `Impossible d'assembler le PDF ${item.displayName}.`
       );
     }
 
     return {
-      uri: completeData.uri,
-      name: completeData.name,
+      uri: completeData.uri || `local://${completeData.localCacheId}`,
+      name: completeData.name || `local/${completeData.localCacheId}`,
       mimeType: completeData.mimeType || 'application/pdf',
       displayName: completeData.displayName || item.displayName,
       ...(completeData.localCacheId ? { localCacheId: completeData.localCacheId } : {}),
@@ -383,7 +458,7 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
 
       const totalBytes = pdfFiles.reduce((sum, item) => sum + item.file.size, 0);
       const shouldUploadViaChunks =
-        totalBytes > 2.5 * 1024 * 1024 || pdfFiles.some((item) => item.file.size > 1.5 * 1024 * 1024);
+        totalBytes > 2 * 1024 * 1024 || pdfFiles.some((item) => item.file.size > 1 * 1024 * 1024);
 
       const preUploadedFiles: Array<{
         uri: string;
@@ -425,20 +500,22 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
         return formData;
       };
 
-      const startRes = await fetchWithRetry('/api/generate-fiches', () => ({
-        method: 'POST',
-        body: buildGenerateBody(),
-      }));
-
-      const startData = await parseJsonSafe<{
+      const { ok: startOk, data: startData } = await fetchJsonWithRetry<{
         jobId?: string;
         status?: 'running' | 'done' | 'error';
         stageMessage?: string;
         deck?: FicheDeck;
         error?: string;
-      }>(startRes, '/api/generate-fiches');
+      }>(
+        '/api/generate-fiches',
+        () => ({
+          method: 'POST',
+          body: buildGenerateBody(),
+        }),
+        { retries: 3, timeoutMs: 45_000, endpointLabel: '/api/generate-fiches' }
+      );
 
-      if (!startRes.ok) {
+      if (!startOk) {
         throw new Error(startData.error || 'Échec du lancement de la génération.');
       }
 
@@ -451,32 +528,32 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
         }
 
         let consecutivePollFailures = 0;
-        const maxPollFailures = 8;
+        const maxPollFailures = 15;
         const pollStartedAt = Date.now();
-        const maxWaitMs = 8 * 60 * 1000;
+        const maxWaitMs = 9 * 60 * 1000;
 
         while (!generatedDeck) {
           if (Date.now() - pollStartedAt > maxWaitMs) {
             throw new Error('La génération dépasse le délai maximal. Essayez avec moins de pages.');
           }
 
-          await new Promise((r) => setTimeout(r, 1500));
+          await new Promise((r) => setTimeout(r, 1700));
 
           try {
-            const pollRes = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
-              cache: 'no-store',
-              credentials: 'same-origin',
-            });
-            const pollData = await parseJsonSafe<{
+            const { ok: pollOk, status: pollStatus, data: pollData } = await fetchJsonWithRetry<{
               status?: 'running' | 'done' | 'error';
               stageMessage?: string;
               elapsedMs?: number;
               deck?: FicheDeck;
               error?: string;
-            }>(pollRes, `/api/jobs/${jobId}`);
+            }>(
+              `/api/jobs/${encodeURIComponent(jobId)}`,
+              () => ({ method: 'GET' }),
+              { retries: 1, timeoutMs: 14_000, endpointLabel: `/api/jobs/${jobId}` }
+            );
 
-            if (!pollRes.ok) {
-              throw new Error(pollData.error || `Erreur de suivi (${pollRes.status}).`);
+            if (!pollOk) {
+              throw new Error(pollData.error || `Erreur de suivi (${pollStatus}).`);
             }
 
             consecutivePollFailures = 0;
@@ -494,10 +571,19 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
             const baseMsg = pollData.stageMessage || 'Rédaction des fiches en cours...';
             setGenerationStage(`${baseMsg} (${secs}s)`);
           } catch (pollErr) {
-            const isNetworkErr =
+            const msg = pollErr instanceof Error ? pollErr.message : '';
+            const isTransientPollErr =
+              pollErr instanceof TransientHttpError ||
               pollErr instanceof TypeError ||
-              (pollErr instanceof Error && pollErr.message === 'Failed to fetch');
-            if (isNetworkErr && consecutivePollFailures < maxPollFailures) {
+              msg === 'Failed to fetch' ||
+              msg.includes('HTML au lieu de JSON') ||
+              msg.includes('Délai d’attente') ||
+              msg.includes('Réponse vide') ||
+              msg.includes('(502)') ||
+              msg.includes('(503)') ||
+              msg.includes('(504)') ||
+              msg.includes('(429)');
+            if (isTransientPollErr && consecutivePollFailures < maxPollFailures) {
               consecutivePollFailures += 1;
               continue;
             }
@@ -1146,8 +1232,8 @@ export const AtelierView: React.FC<AtelierViewProps> = ({
                 </div>
                 <input
                   type="range"
-                  min={1.15}
-                  max={1.55}
+                  min={1.28}
+                  max={1.6}
                   step={0.02}
                   value={currentCard.lineHeight}
                   onChange={(e) =>

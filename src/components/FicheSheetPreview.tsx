@@ -158,7 +158,7 @@ const FicheSidePanel: React.FC<FicheSidePanelProps> = ({
             lineHeight: card.lineHeight,
             sectionGapPx: 12,
             blockGapPx: 6,
-            bulletGapPx: 4,
+            bulletGapPx: 5,
             estimatedUtilizationPercent: estimateSideDensity(
               side,
               card.fontSizePt,
@@ -248,28 +248,28 @@ const FicheSidePanel: React.FC<FicheSidePanelProps> = ({
     if (overflowPx > 1) {
       controlRef.current.hitCeiling = true;
       const canTightenGaps =
-        layout.sectionGapPx > 8 || layout.blockGapPx > 4 || layout.bulletGapPx > 2;
-      const canShrinkFont = layout.fontSizePt > 7.5 || layout.lineHeight > 1.2;
+        layout.sectionGapPx > 9 || layout.blockGapPx > 5 || layout.bulletGapPx > 4;
+      const canShrinkFont = layout.fontSizePt > 7.6 || layout.lineHeight > 1.3;
 
       if (!canTightenGaps && !canShrinkFont) return;
 
       controlRef.current.steps += 1;
       setLayout((prev) => {
-        if (overflowPx <= 16 && (prev.sectionGapPx > 8 || prev.blockGapPx > 4 || prev.bulletGapPx > 2)) {
+        if (overflowPx <= 16 && (prev.sectionGapPx > 9 || prev.blockGapPx > 5 || prev.bulletGapPx > 4)) {
           return {
             ...prev,
-            sectionGapPx: Math.max(8, prev.sectionGapPx - 2),
-            blockGapPx: Math.max(4, prev.blockGapPx - 1),
-            bulletGapPx: Math.max(2, prev.bulletGapPx - 1),
+            sectionGapPx: Math.max(9, prev.sectionGapPx - 2),
+            blockGapPx: Math.max(5, prev.blockGapPx - 1),
+            bulletGapPx: Math.max(4, prev.bulletGapPx - 1),
           };
         }
         const fontStep = overflowPx > 45 ? 0.25 : 0.15;
         return {
           ...prev,
-          fontSizePt: Number(Math.max(7.5, prev.fontSizePt - fontStep).toFixed(2)),
-          lineHeight: Number(Math.max(1.2, prev.lineHeight - 0.02).toFixed(2)),
-          sectionGapPx: Math.max(8, prev.sectionGapPx - 1),
-          blockGapPx: Math.max(4, prev.blockGapPx - 1),
+          fontSizePt: Number(Math.max(7.6, prev.fontSizePt - fontStep).toFixed(2)),
+          lineHeight: Number(Math.max(1.3, prev.lineHeight - 0.02).toFixed(2)),
+          sectionGapPx: Math.max(9, prev.sectionGapPx - 1),
+          blockGapPx: Math.max(5, prev.blockGapPx - 1),
         };
       });
       return;
@@ -277,13 +277,13 @@ const FicheSidePanel: React.FC<FicheSidePanelProps> = ({
 
     // Expand if substantial empty bottom space remains (> 18px / ~4.5mm)
     if (slackPx > 18) {
-      if (!controlRef.current.hitCeiling && (layout.fontSizePt < 11.9 || layout.lineHeight < 1.54)) {
+      if (!controlRef.current.hitCeiling && (layout.fontSizePt < 11.9 || layout.lineHeight < 1.56)) {
         controlRef.current.steps += 1;
         const fontStep = slackPx > 85 ? 0.3 : slackPx > 42 ? 0.2 : 0.1;
         const lhStep = slackPx > 75 ? 0.03 : 0.02;
         setLayout((prev) => ({
           fontSizePt: Number(Math.min(12.0, prev.fontSizePt + fontStep).toFixed(2)),
-          lineHeight: Number(Math.min(1.56, prev.lineHeight + lhStep).toFixed(2)),
+          lineHeight: Number(Math.min(1.58, prev.lineHeight + lhStep).toFixed(2)),
           sectionGapPx: Math.min(32, prev.sectionGapPx + (slackPx > 50 ? 2 : 1)),
           blockGapPx: Math.min(16, prev.blockGapPx + 1),
           bulletGapPx: Math.min(11, prev.bulletGapPx + 1),
@@ -704,18 +704,18 @@ const FicheSidePanel: React.FC<FicheSidePanelProps> = ({
                     return (
                       <div
                         key={block.id}
-                        className="my-1 overflow-hidden rounded-xl border border-slate-900/12 bg-white/42"
+                        className="my-1.5 overflow-hidden rounded-lg border border-slate-900/16 bg-white/62 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
                       >
                         <table
-                          className="w-full border-collapse leading-snug"
+                          className="w-full border-collapse leading-[1.35]"
                           style={{ fontSize: `${tablePt}pt` }}
                         >
                           <thead>
-                            <tr className="bg-slate-900/[0.05] border-b border-slate-900/12">
+                            <tr className="bg-white/88 border-b border-slate-900/14 divide-x divide-slate-900/[0.06]">
                               {block.headers.map((h, i) => (
                                 <th
                                   key={i}
-                                  className="px-2.5 py-1.5 text-left font-bold text-slate-900 align-bottom"
+                                  className="px-2.5 py-1.5 text-left font-bold text-slate-950 align-middle tracking-[0.01em]"
                                 >
                                   {renderSpans(markupToSpans(h))}
                                 </th>
@@ -726,22 +726,22 @@ const FicheSidePanel: React.FC<FicheSidePanelProps> = ({
                             {block.rows.map((row, rIdx) => (
                               <tr
                                 key={rIdx}
-                                className="border-b border-slate-900/[0.07] last:border-b-0 even:bg-white/22"
+                                className="border-b border-slate-900/[0.07] last:border-b-0 divide-x divide-slate-900/[0.06] odd:bg-white/25 even:bg-white/55"
                               >
                                 {row.map((cell, cIdx) => {
                                   const plainCell = cell
                                     .replace(/\[\/?rouge\]|\*\*|__|\*/g, '')
                                     .trim();
-                                  const keepSingleLine =
-                                    plainCell.length <= 15 &&
+                                  const isShortCodeOrNum =
+                                    plainCell.length <= 10 &&
                                     !plainCell.includes(',') &&
                                     !plainCell.includes(';');
                                   return (
                                     <td
                                       key={cIdx}
-                                      className={`px-2.5 py-1 align-top text-slate-800 ${
-                                        keepSingleLine ? 'whitespace-nowrap font-medium' : ''
-                                      }`}
+                                      className={`px-2.5 py-1.5 align-top text-slate-800 ${
+                                        cIdx === 0 ? 'font-semibold text-slate-950' : ''
+                                      } ${isShortCodeOrNum ? 'whitespace-nowrap font-mono-tabular' : ''}`}
                                     >
                                       {renderSpans(markupToSpans(cell))}
                                     </td>

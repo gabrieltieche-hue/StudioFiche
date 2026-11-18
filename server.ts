@@ -57,26 +57,41 @@ function createGeminiClient() {
 }
 
 function isTransientGeminiError(err: unknown): boolean {
-  const raw = err instanceof Error ? err.message : String(err ?? '');
+  const raw = (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
   return (
+    raw.includes('500') ||
+    raw.includes('502') ||
     raw.includes('503') ||
-    raw.includes('UNAVAILABLE') ||
+    raw.includes('504') ||
+    raw.includes('internal') ||
+    raw.includes('unavailable') ||
     raw.includes('high demand') ||
     raw.includes('429') ||
-    raw.includes('RESOURCE_EXHAUSTED') ||
-    raw.includes('ECONNRESET') ||
-    raw.includes('ETIMEDOUT') ||
+    raw.includes('resource_exhausted') ||
+    raw.includes('deadline_exceeded') ||
+    raw.includes('econnreset') ||
+    raw.includes('econnrefused') ||
+    raw.includes('epipe') ||
+    raw.includes('etimedout') ||
+    raw.includes('timeout') ||
+    raw.includes('timed out') ||
+    raw.includes('aborted') ||
+    raw.includes('socket') ||
     raw.includes('fetch failed')
   );
 }
 
 function formatUserFriendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : 'Erreur inattendue lors de la génération.';
-  if (raw.includes('503') || raw.includes('UNAVAILABLE') || raw.includes('high demand')) {
+  const lower = raw.toLowerCase();
+  if (raw.includes('503') || raw.includes('UNAVAILABLE') || lower.includes('high demand')) {
     return 'Le moteur d’analyse est temporairement très sollicité (pic de charge 503). Réessayez dans quelques secondes.';
   }
   if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
     return 'Quota de requêtes temporairement atteint. Patientez quelques instants puis réessayez.';
+  }
+  if (lower.includes('deadline_exceeded') || lower.includes('timed out') || raw.includes('504')) {
+    return 'Le serveur d’analyse a mis trop de temps à répondre (timeout). Réessayez dans quelques secondes.';
   }
   if (raw.includes('PERMISSION_DENIED') || raw.includes('API_KEY_INVALID')) {
     return 'Clé API invalide ou accès refusé. Vérifiez la configuration dans les secrets.';
@@ -399,6 +414,10 @@ const uploadedPdfBufferCache = new Map<string, CachedUploadedPdf>();
 const JOB_TTL_MS = 15 * 60 * 1000;
 const UPLOAD_CACHE_TTL_MS = 25 * 60 * 1000;
 
+const STUDIO_DATA_DIR = path.resolve(__dirname, '.data');
+const STUDIO_DECKS_FILE = path.join(STUDIO_DATA_DIR, 'studio-decks.json');
+const PDF_CACHE_DIR = path.join(STUDIO_DATA_DIR, 'pdf-cache');
+
 setInterval(() => {
   const cutoff = Date.now() - JOB_TTL_MS;
   for (const [jobId, job] of generationJobs.entries()) {
@@ -417,10 +436,26 @@ setInterval(() => {
       uploadedPdfBufferCache.delete(cacheId);
     }
   }
+  void (async () => {
+    try {
+      const files = await fs.readdir(PDF_CACHE_DIR);
+      await Promise.all(
+        files.map(async (name) => {
+          const full = path.join(PDF_CACHE_DIR, name);
+          const st = await fs.stat(full).catch(() => null);
+          if (st && st.mtimeMs < cacheCutoff) {
+            await fs.unlink(full).catch(() => undefined);
+          }
+        })
+      );
+    } catch {
+      // cache dir not created yet
+    }
+  })();
 }, 2 * 60 * 1000).unref();
 
-function storePdfBufferInCache(buffer: Buffer, displayName: string): string {
-  // Bound total cached entries to prevent excessive RAM usage
+async function storePdfBufferInCache(buffer: Buffer, displayName: string): Promise<string> {
+  // Bound total in-memory cached entries to prevent excessive RAM usage
   if (uploadedPdfBufferCache.size >= 16) {
     const oldestKey = uploadedPdfBufferCache.keys().next().value;
     if (oldestKey) uploadedPdfBufferCache.delete(oldestKey);
@@ -431,7 +466,36 @@ function storePdfBufferInCache(buffer: Buffer, displayName: string): string {
     displayName,
     createdAt: Date.now(),
   });
+  try {
+    await fs.mkdir(PDF_CACHE_DIR, { recursive: true });
+    await fs.writeFile(path.join(PDF_CACHE_DIR, `${cacheId}.pdf`), buffer);
+  } catch (diskErr) {
+    console.warn('[pdf-cache] Disk write skipped:', diskErr);
+  }
   return cacheId;
+}
+
+async function readPdfBufferFromCache(
+  cacheId: string,
+  fallbackDisplayName: string
+): Promise<{ buffer: Buffer; displayName: string } | undefined> {
+  const mem = uploadedPdfBufferCache.get(cacheId);
+  if (mem) {
+    return { buffer: mem.buffer, displayName: mem.displayName || fallbackDisplayName };
+  }
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(cacheId)) return undefined;
+  try {
+    const buffer = await fs.readFile(path.join(PDF_CACHE_DIR, `${cacheId}.pdf`));
+    return { buffer, displayName: fallbackDisplayName };
+  } catch {
+    return undefined;
+  }
+}
+
+async function deletePdfBufferFromCache(cacheId: string): Promise<void> {
+  uploadedPdfBufferCache.delete(cacheId);
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(cacheId)) return;
+  await fs.unlink(path.join(PDF_CACHE_DIR, `${cacheId}.pdf`)).catch(() => undefined);
 }
 
 async function runWithConcurrency<T, R>(
@@ -615,9 +679,6 @@ function handleMulterUpload(
   };
 }
 
-const STUDIO_DATA_DIR = path.resolve(__dirname, '.data');
-const STUDIO_DECKS_FILE = path.join(STUDIO_DATA_DIR, 'studio-decks.json');
-
 async function readStudioDecks(): Promise<FicheDeck[]> {
   try {
     const raw = await fs.readFile(STUDIO_DECKS_FILE, 'utf8');
@@ -648,6 +709,10 @@ async function removeStudioDeck(deckId: string): Promise<void> {
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '6mb' }));
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    next();
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, hasGeminiKey: Boolean(process.env.GEMINI_API_KEY) });
@@ -706,7 +771,7 @@ async function startServer() {
       const ai = createGeminiClient();
       const displayName = ensurePdfFilename(file.originalname);
       const uploaded = await uploadBufferToGeminiFiles(ai, file.buffer, displayName);
-      const localCacheId = storePdfBufferInCache(Buffer.from(file.buffer), displayName);
+      const localCacheId = await storePdfBufferInCache(Buffer.from(file.buffer), displayName);
       res.json({
         ...uploaded,
         displayName,
@@ -740,7 +805,7 @@ async function startServer() {
         !Number.isInteger(chunkIndex) ||
         !Number.isInteger(totalChunks) ||
         totalChunks < 1 ||
-        totalChunks > 40 ||
+        totalChunks > 80 ||
         chunkIndex < 0 ||
         chunkIndex >= totalChunks
       ) {
@@ -819,11 +884,11 @@ async function startServer() {
         return;
       }
 
-      const ai = createGeminiClient();
-      const uploaded = await uploadBufferToGeminiFiles(ai, fullBuffer, session.displayName);
-      const localCacheId = storePdfBufferInCache(fullBuffer, session.displayName);
+      const localCacheId = await storePdfBufferInCache(fullBuffer, session.displayName);
       res.json({
-        ...uploaded,
+        uri: `local://${localCacheId}`,
+        name: `local/${localCacheId}`,
+        mimeType: 'application/pdf',
         displayName: session.displayName,
         size: fullBuffer.length,
         localCacheId,
@@ -866,7 +931,11 @@ async function startServer() {
         try {
           const parsed = JSON.parse(req.body.uploadedFiles);
           if (Array.isArray(parsed)) {
-            preUploadedFiles = parsed.filter((item) => item && typeof item.uri === 'string');
+            preUploadedFiles = parsed.filter(
+              (item) =>
+                item &&
+                (typeof item.uri === 'string' || typeof item.localCacheId === 'string')
+            );
           }
         } catch {
           res.status(400).json({ error: 'Format uploadedFiles invalide.' });
@@ -930,7 +999,7 @@ async function startServer() {
       void (async () => {
         const geminiFileNamesToCleanup: string[] = preUploadedFiles
           .map((pf) => pf.name)
-          .filter((n): n is string => Boolean(n));
+          .filter((n): n is string => Boolean(n && !n.startsWith('local/')));
         const consumedLocalCacheIds: string[] = preUploadedFiles
           .map((pf) => pf.localCacheId)
           .filter((id): id is string => Boolean(id));
@@ -944,6 +1013,24 @@ async function startServer() {
           | { text: string }
           | { inlineData: { mimeType: string; data: string } }
           | { fileData: { fileUri: string; mimeType: string } };
+
+        const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> =>
+          new Promise<T>((resolve, reject) => {
+            const timer = setTimeout(
+              () => reject(new Error(`DEADLINE_EXCEEDED: Timeout after ${timeoutMs}ms on ${label}`)),
+              timeoutMs
+            );
+            promise.then(
+              (val) => {
+                clearTimeout(timer);
+                resolve(val);
+              },
+              (err) => {
+                clearTimeout(timer);
+                reject(err);
+              }
+            );
+          });
 
         const callGeminiJson = async (
           stageLabel: string,
@@ -961,15 +1048,19 @@ async function startServer() {
           for (let i = 0; i < attempts.length; i += 1) {
             const cfg = attempts[i];
             try {
-              return await ai.models.generateContent({
-                model: cfg.model,
-                contents: { parts },
-                config: {
-                  ...(cfg.useThinking ? { thinkingConfig: { thinkingLevel } } : {}),
-                  responseMimeType: 'application/json',
-                  responseSchema: schema,
-                },
-              });
+              return await withTimeout(
+                ai.models.generateContent({
+                  model: cfg.model,
+                  contents: { parts },
+                  config: {
+                    ...(cfg.useThinking ? { thinkingConfig: { thinkingLevel } } : {}),
+                    responseMimeType: 'application/json',
+                    responseSchema: schema,
+                  },
+                }),
+                95_000,
+                stageLabel
+              );
             } catch (genErr) {
               lastErr = genErr;
               console.warn(
@@ -1048,10 +1139,12 @@ async function startServer() {
 
           for (const pf of preUploadedFiles) {
             const name = ensurePdfFilename(pf.displayName || 'document.pdf');
-            const cached = pf.localCacheId ? uploadedPdfBufferCache.get(pf.localCacheId) : undefined;
+            const cached = pf.localCacheId
+              ? await readPdfBufferFromCache(pf.localCacheId, name)
+              : undefined;
             if (cached) {
               await enqueueBufferBatches(cached.buffer, cached.displayName || name);
-            } else {
+            } else if (pf.uri && !pf.uri.startsWith('local://')) {
               totalKnownPages += 6;
               preparedBatches.push({
                 batchIndex: preparedBatches.length,
@@ -1067,6 +1160,10 @@ async function startServer() {
                   },
                 },
               });
+            } else {
+              throw new Error(
+                `Le document « ${name} » a expiré du cache temporaire. Relancez la génération.`
+              );
             }
           }
 
@@ -1101,10 +1198,10 @@ Tu dois effectuer un RELEVÉ EXHAUSTIF ET FIDÈLE de cet extrait PDF : "${batch.
 Matière : ${subject} | Classe : ${className} | Chapitre : ${topic}
 
 CONSIGNES IMPÉRATIVES :
-1. Lis CHAQUE PAGE de cet extrait du haut en bas (notes manuscrites d'élève, textes de cours, documents du manuel, cartes, encadrés vocabulaire, légendes, tableaux, schémas, marges).
-2. Ne résume pas en termes vagues ! Transcris dans "keyFactsAndConcepts" TOUS les faits précis : dates exactes + événement, noms d'acteurs/lieux/cités, définitions complètes, mécanismes, causes/conséquences, chiffres et exemples du manuel (ex: noms de cités, édits, lois, personnages, notions).
+1. Lis CHAQUE PAGE de cet extrait du haut en bas (notes manuscrites d'élève, textes de cours, activités expérimentales, documents du manuel, cartes, encadrés vocabulaire, légendes, tableaux, schémas, marges).
+2. Ne résume JAMAIS en termes vagues ! Transcris dans "keyFactsAndConcepts" TOUS les faits précis : dates exactes + événement, noms d'acteurs/auteurs/lieux, définitions complètes, **protocoles et observations d'expériences / résultats / conclusions**, mécanismes, causes/conséquences, chiffres et exemples précis.
 3. Utilise des références explicites dans "pageRef" (ex: "${batch.displayName} — p. ${batch.startPage}" ...).
-4. Reproduis toutes les formules/données chiffrées dans "formulasAndData", les tableaux dans "tablesFound", et les schémas/organigrammes dans "diagramsFound".
+4. Reproduis toutes les formules/équations/données chiffrées dans "formulasAndData", les tableaux dans "tablesFound", et les schémas complets avec leurs relations/flèches dans "diagramsFound".
 `;
               const resp = await callGeminiJson(
                 `1/4 Lecture intégrale (${completedBatches}/${preparedBatches.length} lots)...`,
@@ -1236,7 +1333,7 @@ RÈGLES STRICTES DE PLANIFICATION :
             const relevantIndices = selectRelevantBatchIndices(
               cPlan.assignedBatchIndices || [],
               preparedBatches.length,
-              3
+              4
             );
             const relevantPdfParts = relevantIndices.map((bi) => preparedBatches[bi].part);
             const relevantBatchesText = serializeBatchInventoryForPrompt(
@@ -1262,29 +1359,32 @@ PLAN ASSIGNÉ POUR CETTE FICHE :
 - Sujets ciblés : ${(cPlan.focusTopics || []).join(' ; ')}
 - Plan RECTO (leftSide) : ${cPlan.rectoOutline || 'Parties I. et II.'}
 - Plan VERSO (rightSide) : ${cPlan.versoOutline || 'Parties III. et IV.'}
-${cPlan.shouldIncludeDiagram ? `- SCHÉMA VECTORIEL REQUIS ("diagram") : ${cPlan.diagramDescription || 'Schéma de synthèse clair avec 4 à 7 nœuds et flèches.'}` : ''}
+${cPlan.shouldIncludeDiagram ? `- SCHÉMA VECTORIEL REQUIS ("diagram") : ${cPlan.diagramDescription || 'Schéma fonctionnel clair (4 à 6 nœuds reliés par au moins 2 flèches nommées).'}` : ''}
 ${cPlan.shouldIncludeTable ? '- TABLEAU REQUIS ("table") : Inclus un tableau comparatif ou chronologique synthétique.' : ''}
 
-FAITS, DATES, ACTEURS, DÉFINITIONS ET EXEMPLES À INTÉGRER À 100 % (ZÉRO OUBLI) :
+FAITS, EXPÉRIENCES, DÉFINITIONS ET EXEMPLES À INTÉGRER (ZÉRO OUBLI DES NOTIONS CLÉS) :
 ${assignedFactsText || relevantBatchesText}
 
 RELEVÉ DÉTAILLÉ DES LOTS SOURCES :
 ${relevantBatchesText}
 
-EXIGENCES STRICTES DE SYNTHÈSE AÉRÉE ET DE PLEINE PAGE (14 × 19 CM) :
-1. **SYNTHÈSE HAUT RENDEMENT — PLEINE PAGE (88–95 % PAR FACE, ZÉRO VIDE EN BAS ET ZÉRO DÉPASSEMENT)** :
-   - Interdiction absolue de laisser un tiers ou un quart de page vide en bas ! Développe chaque notion clé avec ses exemples, citations brèves, procédés, dates et enjeux précis pour occuper tout l'espace utile.
-   - Interdiction aussi de coller des pavés bruts de 5–8 lignes par puce : **synthétise** chaque idée en puces nettes de **1 à 3 lignes maximum** (max ~170–230 caractères par puce). Quand un thème comporte plusieurs détails, décompose-le en 1 amorce level 1 courte + 2–3 sous-puces level 2 concises.
-   - **RECTO (leftSide)** : vise **1 950 à 2 350 caractères** sans schéma (ou **1 300 à 1 650 car.** si un schéma ou tableau figure sur le Recto).
-   - **VERSO (rightSide)** : vise **2 000 à 2 450 caractères** sans schéma/tableau (ou **1 350 à 1 700 car.** si un schéma ou tableau figure sur le Verso).
+EXIGENCES STRICTES DE JUSTE MILIEU — SYNTHÈSE AÉRÉE ET PLEINE PAGE (14 × 19 CM) :
+1. **JUSTE MILIEU (NI FICHE VIDE, NI MUR DE TEXTE RECRACHÉ)** :
+   - Interdiction absolue de laisser du vide en bas de page OU de recopier des phrases entières du cours dans des puces de 5–7 lignes !
+   - **Synthétise chaque idée en puces nettes et mémorisables de 1 à 2,5 lignes max (~105 à 165 caractères par puce)**. Supprime le remplissage verbeux et les parenthèses en cascade ; garde l'essentiel : notion, mécanisme/expérience, résultat, date ou bref exemple.
+   - Quand un sujet est riche, utilise 1 courte amorce level 1 + 2 à 3 sous-puces level 2 très brèves.
+   - **RECTO (leftSide)** : vise **1 450 à 1 800 caractères** sans schéma (ou **1 000 à 1 300 car.** si un schéma ou tableau figure sur le Recto).
+   - **VERSO (rightSide)** : vise **1 450 à 1 850 caractères** sans schéma/tableau (ou **1 000 à 1 350 car.** si un schéma ou tableau figure sur le Verso).
    - NE DÉBORDE JAMAIS de la page 14 × 19 cm !
-2. **STRUCTURE** : Numérote toujours avec un point : "I.", "II." sur le Recto ; "III.", "IV." sur le Verso (ou "1.", "2.", "3.", "4." avec "isSubHeader": true). Termine souvent le Verso par un bloc "vocabList" (4–5 termes concis), "table" (3 colonnes, 3–5 lignes comparant œuvres/auteurs/notions/repères) ou "diagram". En Français/Histoire, un court "table" comparatif ou "diagram" structurant enrichit fortement la fiche.
+2. **STRUCTURE** : Numérote toujours avec un point : "I.", "II." sur le Recto ; "III.", "IV." sur le Verso. Termine volontiers le Verso par un bloc "vocabList" (4–5 définitions courtes), "table" (3 colonnes, 3–5 lignes) ou "diagram".
 3. **TYPOGRAPHIE & SURLIGNAGE FIDÈLES** :
-   - Utilise __Amorce :__ pour souligner le titre court de chaque puce avant les deux points (ex: "__Rousseau, Les Confessions (1782) :__ 1re autobiographie moderne..."). Évite d'imbriquer des astérisques *...* à l'intérieur de __...__ (place les titres d'œuvres en *italique* juste après le titre souligné, ou simplement en texte souligné propre).
-   - INTERDIT de ne mettre en [rouge] que des chiffres ou dates isolés (évite "[rouge]-509[/rouge]"). Mets en [rouge]...[/rouge] les **notions, définitions, procédés, causes/effets ou événements datés clés** (3 à 8 mots par bloc rouge, 1 max par puce).
-   - Mets les acteurs, auteurs, lieux et notions secondaires en **gras**.
-4. **SCHÉMA VECTORIEL COMPACT ("diagram")** : Privilégie un schéma **équilibré et peu haut** (2 colonnes parallèles ou 3 paliers horizontaux max, 4 à 6 "nodes", x entre 22 et 78, y entre 12 et 88, libellé <= 24 car., sous-libellé <= 24 car.), au moins 2 "edges", et "groups" si deux compartiments existent. JAMAIS "nodes": [].
-5. **TABLEAU SYNTHÉTIQUE ("table")** : Si un tableau est inclus, garde 3 colonnes max, 3 à 5 lignes max, avec des repères courts en 1re/2e colonne (ex: "Rousseau (1782)") et des synthèses brèves en dernière colonne.
+   - Utilise __Amorce :__ pour souligner le titre court avant les deux points (ex: "__Expérience de Griffith (1928) :__ ..."). N'imbrique jamais *...* dans __...__.
+   - Mets en [rouge]...[/rouge] les **notions, mécanismes ou conclusions cruciales** (3 à 7 mots, 1 max par puce ; jamais juste un chiffre isolé).
+   - Mets les acteurs, auteurs, molécules/organes clés et notions secondaires en **gras**.
+4. **SCHÉMA VECTORIEL CONNECTÉ ET ÉQUILIBRÉ ("diagram")** :
+   - OBLIGATOIRE si un schéma est inclus : **4 à 6 "nodes"** ET **AU MOINS 2 à 6 "edges"** utilisant les "id" exacts des nœuds (JAMAIS 0 flèche / boîtes flottantes déconnectées !).
+   - Disposition nette en 2 colonnes ou 3 paliers horizontaux : x entre 24 et 76, y entre 14 et 86, width entre 30 et 44, libellé <= 22 car., sous-libellé <= 22 car.
+5. **TABLEAU SYNTHÉTIQUE ("table")** : 3 colonnes max, 3 à 5 lignes max, cellules ultra-concises (<= 6 mots dans les colonnes 1–2, synthèse brève en colonne 3).
 `;
             const cardResp = await callGeminiJson(
               `3/4 Rédaction fiche ${idx + 1}/${cardsPlan.length}...`,
@@ -1324,11 +1424,11 @@ EXIGENCES STRICTES DE SYNTHÈSE AÉRÉE ET DE PLEINE PAGE (14 × 19 CM) :
           const expandedRawCards = await runWithConcurrency(rawCards, 2, async (rawCard, idx) => {
             const leftClean = { sections: sanitizeSideSections(rawCard.leftSide?.sections, 'l', idx) };
             const rightClean = { sections: sanitizeSideSections(rawCard.rightSide?.sections, 'r', idx) };
-            const leftD = estimateSideDensity(leftClean, 9.2, 1.35, 'recto');
-            const rightD = estimateSideDensity(rightClean, 9.2, 1.35, 'verso');
+            const leftD = estimateSideDensity(leftClean, 9.2, 1.38, 'recto');
+            const rightD = estimateSideDensity(rightClean, 9.2, 1.38, 'verso');
 
-            const hasOverflow = leftD.utilizationPercent > 97 || rightD.utilizationPercent > 97;
-            const hasUnderfill = leftD.utilizationPercent < 86 || rightD.utilizationPercent < 86;
+            const hasOverflow = leftD.utilizationPercent > 95 || rightD.utilizationPercent > 95;
+            const hasUnderfill = leftD.utilizationPercent < 80 || rightD.utilizationPercent < 80;
 
             if (!hasOverflow && !hasUnderfill) {
               return rawCard;
@@ -1339,26 +1439,26 @@ EXIGENCES STRICTES DE SYNTHÈSE AÉRÉE ET DE PLEINE PAGE (14 × 19 CM) :
               const relevantIndices = selectRelevantBatchIndices(
                 cPlan?.assignedBatchIndices || [],
                 preparedBatches.length,
-                2
+                3
               );
+              const relevantPdfParts = relevantIndices.map((bi) => preparedBatches[bi].part);
               const relevantBatchesText = serializeBatchInventoryForPrompt(
                 relevantIndices.map((bi) => batchInventories[bi]).filter(Boolean)
               );
 
               if (hasOverflow) {
                 setStage(
-                  `4/4 Aération & équilibrage anti-dépassement fiche ${idx + 1}/${rawCards.length} (R: ${leftD.utilizationPercent}%, V: ${rightD.utilizationPercent}%)...`
+                  `4/4 Aération & synthèse fiche ${idx + 1}/${rawCards.length} (R: ${leftD.utilizationPercent}%, V: ${rightD.utilizationPercent}%)...`
                 );
                 const condensePrompt = `
-Cette fiche 14 × 19 cm DÉBORDE ou est TROP SURCHARGÉE / COLLÉE :
-- RECTO actuel (leftSide) : ${leftD.utilizationPercent}% (${leftD.estimatedChars} caractères) — CIBLE IMPÉRATIVE : **88% à 94%** (<= 96%).
-- VERSO actuel (rightSide) : ${rightD.utilizationPercent}% (${rightD.estimatedChars} caractères) — CIBLE IMPÉRATIVE : **88% à 94%** (<= 96%).
+Cette fiche 14 × 19 cm est TROP SURCHARGÉE / DÉBORDE :
+- RECTO actuel (leftSide) : ${leftD.utilizationPercent}% (${leftD.estimatedChars} caractères) — CIBLE IMPÉRATIVE : **82% à 92%** (<= 94%).
+- VERSO actuel (rightSide) : ${rightD.utilizationPercent}% (${rightD.estimatedChars} caractères) — CIBLE IMPÉRATIVE : **82% à 92%** (<= 94%).
 
-MISSION DE SYNTHÈSE AÉRÉE :
-1. Garde 100 % des notions essentielles, dates, acteurs, formules, tableaux et schémas importants.
-2. Remplace les longs pavés de prose (4–8 lignes) par des **puces synthétiques claires et respirantes de 1 à 3 lignes max** (supprime les redites, périphrases et énumérations accessoires sans intérêt).
-3. Rééquilibre au besoin les sections entre Recto (leftSide) et Verso (rightSide) pour que AUCUNE face ne dépasse 96 % et qu'aucun titre ne soit coupé en bas de page.
-4. Si un schéma est très vertical ou verbeux, garde ses libellés courts (<= 22 car.) et 4–6 nœuds max.
+MISSION DE SYNTHÈSE AÉRÉE (JUSTE MILIEU) :
+1. Garde 100 % des notions essentielles, dates, acteurs, expériences, formules, tableaux et schémas importants.
+2. Transforme les pavés de texte (4–7 lignes) en **puces synthétiques ultra-lisibles de 1 à 2,5 lignes max (~110–160 car.)** en supprimant périphrases et parenthèses superflues.
+3. Rééquilibre au besoin les sections entre Recto et Verso pour que AUCUNE face ne dépasse 94 %.
 
 FICHE ACTUELLE À AÉRER (JSON) :
 ${JSON.stringify(rawCard)}
@@ -1377,33 +1477,49 @@ ${JSON.stringify(rawCard)}
               }
 
               setStage(
-                `4/4 Équilibrage fiche ${idx + 1}/${rawCards.length} (R: ${leftD.utilizationPercent}%, V: ${rightD.utilizationPercent}%)...`
+                `4/4 Complétude & remplissage fiche ${idx + 1}/${rawCards.length} (R: ${leftD.utilizationPercent}%, V: ${rightD.utilizationPercent}%)...`
               );
               const expandPrompt = `
-Cette fiche 14 × 19 cm laisse du vide en bas d'au moins une face :
-- RECTO actuel (leftSide) : ${leftD.utilizationPercent}% (${leftD.estimatedChars} caractères) — OBJECTIF : **89% à 95%** (STRICTEMENT <= 96%, zéro vide en bas de page !).
-- VERSO actuel (rightSide) : ${rightD.utilizationPercent}% (${rightD.estimatedChars} caractères) — OBJECTIF : **89% à 95%** (STRICTEMENT <= 96%, zéro vide en bas de page !).
+Cette fiche 14 × 19 cm est INCOMPLÈTE ou laisse du vide important :
+- RECTO actuel (leftSide) : ${leftD.utilizationPercent}% (${leftD.estimatedChars} caractères) — OBJECTIF : **84% à 93%** (<= 95%, zéro grand vide en bas !).
+- VERSO actuel (rightSide) : ${rightD.utilizationPercent}% (${rightD.estimatedChars} caractères) — OBJECTIF : **84% à 93%** (<= 95%, zéro grand vide en bas !).
 
-MISSION : Conserve tout le contenu déjà rédigé et enrichis UNIQUEMENT le côté < 88% en y ajoutant des exemples/citations clés, des sous-puces analytiques courtes (1–3 lignes max par puce), des définitions ("vocabList"), ou un bref tableau récapitulatif ("table" 3 colonnes, 3–4 lignes) / schéma compact tirés des sources ci-dessous, pour remplir la page 14 × 19 cm sans jamais dépasser 96 %.
+MISSION : Relis attentivement les PDF joints et le relevé complet ci-dessous, puis complète la face sous-remplie en intégrant les expériences, observations, mécanismes, définitions, exemples concrets et repères qui manquent (en puces nettes de 1 à 2,5 lignes, sans pavés lourds ni dépassement > 95%).
 
 FICHE ACTUELLE (JSON) :
 ${JSON.stringify(rawCard)}
 
-FAITS ET SOURCES DISPONIBLES :
+FAITS ASSIGNÉS :
 ${(cPlan?.assignedFactsVerbatim || []).join('\n')}
 
-EXTRAITS DU RELEVÉ :
-${relevantBatchesText}
+RELEVÉ SOURCE COMPLET :
+${relevantBatchesText || inventoryText}
 `;
               const expResp = await callGeminiJson(
-                `4/4 Équilibrage fiche ${idx + 1}/${rawCards.length}...`,
-                [{ text: expandPrompt }],
+                `4/4 Complétude fiche ${idx + 1}/${rawCards.length}...`,
+                [...relevantPdfParts, { text: expandPrompt }],
                 singleCardSchema,
                 ThinkingLevel.MEDIUM
               );
               const expanded = JSON.parse((expResp.text ?? '{}').trim()) as RawGeneratedCard;
               if (expanded.leftSide?.sections?.length && expanded.rightSide?.sections?.length) {
-                return expanded;
+                const expL = estimateSideDensity(
+                  { sections: sanitizeSideSections(expanded.leftSide.sections, 'el', idx) },
+                  9.2,
+                  1.38,
+                  'recto'
+                );
+                const expR = estimateSideDensity(
+                  { sections: sanitizeSideSections(expanded.rightSide.sections, 'er', idx) },
+                  9.2,
+                  1.38,
+                  'verso'
+                );
+                const oldSum = Math.min(95, leftD.utilizationPercent) + Math.min(95, rightD.utilizationPercent);
+                const newSum = Math.min(95, expL.utilizationPercent) + Math.min(95, expR.utilizationPercent);
+                if (newSum >= oldSum && expL.utilizationPercent <= 98 && expR.utilizationPercent <= 98) {
+                  return expanded;
+                }
               }
             } catch (expErr) {
               console.warn(
@@ -1422,7 +1538,7 @@ ${relevantBatchesText}
               `Rédige une fiche synthétique sur ${c.title || topic}.`,
           }));
 
-          // Pass 4b (text-grounded): synthesize nodes/edges/groups if any diagram came back empty
+          // Pass 4b (text-grounded): synthesize/repair any diagram missing nodes OR missing edges (disconnected boxes)
           const diagramRequests: Array<{
             targetKey: string;
             cardIdx: number;
@@ -1431,6 +1547,7 @@ ${relevantBatchesText}
             blkIdx: number;
             title: string;
             contextTitle: string;
+            existingNodeLabels?: string[];
           }> = [];
           let totalPopulatedDiagrams = 0;
 
@@ -1441,8 +1558,9 @@ ${relevantBatchesText}
                 const blks = Array.isArray(sec.blocks) ? (sec.blocks as Record<string, unknown>[]) : [];
                 blks.forEach((blk, bIdx) => {
                   if (blk?.type === 'diagram') {
-                    const nodeCount = Array.isArray(blk.nodes) ? blk.nodes.length : 0;
-                    if (nodeCount > 0) {
+                    const nodeList = Array.isArray(blk.nodes) ? (blk.nodes as Array<Record<string, unknown>>) : [];
+                    const edgeList = Array.isArray(blk.edges) ? blk.edges : [];
+                    if (nodeList.length >= 2 && edgeList.length >= 1) {
                       totalPopulatedDiagrams += 1;
                     } else {
                       diagramRequests.push({
@@ -1456,6 +1574,9 @@ ${relevantBatchesText}
                             ? blk.title.trim()
                             : String(sec.title || c.title || topic),
                         contextTitle: String(c.title || topic),
+                        existingNodeLabels: nodeList
+                          .map((n) => (typeof n?.label === 'string' ? n.label.trim() : ''))
+                          .filter(Boolean),
                       });
                     }
                   }
@@ -1515,7 +1636,14 @@ RÈGLES DE CONSTRUCTION :
 
 Schémas à générer :
 ${diagramRequests
-  .map((r) => `- targetKey: "${r.targetKey}" | Fiche: "${r.contextTitle}" | Titre schéma: "${r.title}"`)
+  .map(
+    (r) =>
+      `- targetKey: "${r.targetKey}" | Fiche: "${r.contextTitle}" | Titre schéma: "${r.title}"${
+        r.existingNodeLabels && r.existingNodeLabels.length > 0
+          ? ` | Éléments à relier logiquement : ${r.existingNodeLabels.join(', ')}`
+          : ''
+      }`
+  )
   .join('\n')}
 `;
               const repairResp = await callGeminiJson(
@@ -1578,7 +1706,7 @@ ${diagramRequests
               backgroundHex: palette.backgroundHex,
               visualStyle,
               fontSizePt: 9.2,
-              lineHeight: 1.35,
+              lineHeight: 1.38,
               autoFillHeight: true,
               leftSide: {
                 sections: sanitizeSideSections(c.leftSide?.sections, 'l', idx),
@@ -1640,8 +1768,10 @@ ${diagramRequests
           job.error = formatUserFriendlyError(err);
           job.updatedAt = Date.now();
         } finally {
-          for (const cacheId of consumedLocalCacheIds) {
-            uploadedPdfBufferCache.delete(cacheId);
+          if (consumedLocalCacheIds.length > 0) {
+            await Promise.allSettled(
+              consumedLocalCacheIds.map((cacheId) => deletePdfBufferFromCache(cacheId))
+            );
           }
           if (geminiFileNamesToCleanup.length > 0) {
             await Promise.allSettled(

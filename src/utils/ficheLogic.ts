@@ -549,7 +549,7 @@ export function parseDeckFromJsonInput(rawJson: string): FicheDeck {
       backgroundHex: card.backgroundHex || palette.backgroundHex,
       visualStyle: card.visualStyle === '3eB' ? '3eB' : '2ndE',
       fontSizePt: typeof card.fontSizePt === 'number' ? card.fontSizePt : 9.2,
-      lineHeight: typeof card.lineHeight === 'number' ? card.lineHeight : 1.35,
+      lineHeight: typeof card.lineHeight === 'number' ? card.lineHeight : 1.38,
       autoFillHeight: card.autoFillHeight !== false,
       leftSide: normalizeSide(card.leftSide ?? card.recto, idx, 'L'),
       rightSide: normalizeSide(card.rightSide ?? card.verso, idx, 'R'),
@@ -719,8 +719,8 @@ export function computeAutoSideTypography(
   sideRole: 'recto' | 'verso' = 'recto'
 ): AutoSideTypography {
   const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
-  let font = Number(clamp(baseFontSizePt, 7.6, 12.0).toFixed(2));
-  let lh = Number(clamp(baseLineHeight, 1.22, 1.54).toFixed(2));
+  let font = Number(clamp(baseFontSizePt, 7.8, 12.0).toFixed(2));
+  let lh = Number(clamp(baseLineHeight, 1.32, 1.56).toFixed(2));
 
   if (!side.sections || side.sections.length === 0) {
     return {
@@ -728,26 +728,26 @@ export function computeAutoSideTypography(
       lineHeight: lh,
       sectionGapPx: 12,
       blockGapPx: 6,
-      bulletGapPx: 4,
+      bulletGapPx: 5,
       estimatedUtilizationPercent: 0,
     };
   }
 
   let density = estimateSideDensity(side, font, lh, sideRole);
 
-  // Step down if overflowing (> 98%)
+  // Step down if overflowing (> 98%) while preserving comfortable reading line-height >= 1.32
   for (let i = 0; i < 18 && density.utilizationPercent > 98; i += 1) {
-    if (font <= 7.6 && lh <= 1.22) break;
-    if (font > 7.6) font = Number(Math.max(7.6, font - 0.2).toFixed(2));
-    if (lh > 1.22) lh = Number(Math.max(1.22, lh - 0.02).toFixed(2));
+    if (font <= 7.8 && lh <= 1.32) break;
+    if (font > 7.8) font = Number(Math.max(7.8, font - 0.2).toFixed(2));
+    if (lh > 1.32) lh = Number(Math.max(1.32, lh - 0.02).toFixed(2));
     density = estimateSideDensity(side, font, lh, sideRole);
   }
 
   // Step up independently on sparse sides (< 92%) so text is larger & fills the 14x19cm page
   for (let i = 0; i < 20 && density.utilizationPercent < 92; i += 1) {
-    if (font >= 12.0 && lh >= 1.54) break;
+    if (font >= 12.0 && lh >= 1.56) break;
     const nextFont = font < 12.0 ? Number(Math.min(12.0, font + 0.2).toFixed(2)) : font;
-    const nextLh = lh < 1.54 ? Number(Math.min(1.54, lh + 0.02).toFixed(2)) : lh;
+    const nextLh = lh < 1.56 ? Number(Math.min(1.56, lh + 0.02).toFixed(2)) : lh;
     const cand = estimateSideDensity(side, nextFont, nextLh, sideRole);
     if (cand.utilizationPercent > 96) {
       const halfFont = font < 12.0 ? Number(Math.min(12.0, font + 0.1).toFixed(2)) : font;
@@ -764,9 +764,9 @@ export function computeAutoSideTypography(
   }
 
   const slack = Math.max(0, 96 - density.utilizationPercent);
-  const sectionGapPx = clamp(Math.round(11 + slack * 0.75), 10, 28);
-  const blockGapPx = clamp(Math.round(6 + slack * 0.4), 5, 14);
-  const bulletGapPx = clamp(Math.round(4 + slack * 0.28), 3, 10);
+  const sectionGapPx = clamp(Math.round(12 + slack * 0.75), 10, 28);
+  const blockGapPx = clamp(Math.round(7 + slack * 0.4), 6, 15);
+  const bulletGapPx = clamp(Math.round(5 + slack * 0.28), 5, 11);
 
   return {
     fontSizePt: font,
@@ -830,18 +830,18 @@ export function rebalanceCardLayout(card: FicheCard): FicheCard {
   }
 
   // Gently scale font/lineHeight down if either side overflows (> 98%),
-  // or step up (up to 10.4pt / 1.44) if both sides still have bottom space (< 88%).
+  // or step up (up to 10.6pt / 1.46) if both sides still have bottom space (< 88%).
   for (let step = 0; step < 8; step += 1) {
     const leftD = estimateSideDensity({ sections: leftSections }, fontSizePt, lineHeight, 'recto');
     const rightD = estimateSideDensity({ sections: rightSections }, fontSizePt, lineHeight, 'verso');
     if (leftD.utilizationPercent <= 98 && rightD.utilizationPercent <= 98) {
       break;
     }
-    if (fontSizePt > 7.7) {
-      fontSizePt = Number((fontSizePt - 0.2).toFixed(1));
+    if (fontSizePt > 7.8) {
+      fontSizePt = Number(Math.max(7.8, fontSizePt - 0.2).toFixed(1));
     }
-    if (lineHeight > 1.24) {
-      lineHeight = Number((lineHeight - 0.02).toFixed(2));
+    if (lineHeight > 1.32) {
+      lineHeight = Number(Math.max(1.32, lineHeight - 0.02).toFixed(2));
     }
   }
 
@@ -851,8 +851,8 @@ export function rebalanceCardLayout(card: FicheCard): FicheCard {
     if (leftD.utilizationPercent >= 88 || rightD.utilizationPercent >= 88) {
       break;
     }
-    const nextFont = fontSizePt < 10.4 ? Number((fontSizePt + 0.2).toFixed(1)) : fontSizePt;
-    const nextLh = lineHeight < 1.44 ? Number((lineHeight + 0.02).toFixed(2)) : lineHeight;
+    const nextFont = fontSizePt < 10.6 ? Number((fontSizePt + 0.2).toFixed(1)) : fontSizePt;
+    const nextLh = lineHeight < 1.46 ? Number((lineHeight + 0.02).toFixed(2)) : lineHeight;
     const candL = estimateSideDensity({ sections: leftSections }, nextFont, nextLh, 'recto');
     const candR = estimateSideDensity({ sections: rightSections }, nextFont, nextLh, 'verso');
     if (candL.utilizationPercent > 96 || candR.utilizationPercent > 96) {

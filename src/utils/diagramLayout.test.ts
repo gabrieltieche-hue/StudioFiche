@@ -149,3 +149,35 @@ test('Cross-column upward connector routes cleanly through center gutter without
   assert.ok(crossEdge);
   assert.ok(crossEdge.labelX > mag.right && crossEdge.labelX < aug.left, 'Cross-column connector must route through the center gutter');
 });
+
+test('Ungrouped 2-node rows and center single-node rows align symmetrically without drift', () => {
+  const layout = computeDiagramLayout({
+    nodes: [
+      { id: 'paroi', label: 'Paroi cellulaire', x: 20, y: 20, width: 34, tone: 'slate' },
+      { id: 'memb', label: 'Membrane plasmique', x: 20, y: 50, width: 34, tone: 'blue' },
+      { id: 'cyto', label: 'Cytoplasme', x: 75, y: 50, width: 34, tone: 'green' },
+      { id: 'noyau', label: 'Noyau (ADN)', x: 64, y: 80, width: 34, tone: 'red' },
+    ],
+    edges: [
+      { from: 'paroi', to: 'memb', label: 'entoure' },
+      { from: 'memb', to: 'cyto', label: 'délimite' },
+      { from: 'cyto', to: 'noyau', label: 'contient' },
+    ],
+  });
+
+  const memb = layout.nodes.find((n) => n.id === 'memb')!;
+  const cyto = layout.nodes.find((n) => n.id === 'cyto')!;
+  const noyau = layout.nodes.find((n) => n.id === 'noyau')!;
+
+  const distLeft = memb.cx;
+  const distRight = layout.width - cyto.cx;
+  assert.ok(
+    Math.abs(distLeft - distRight) <= 12,
+    `Expected symmetric 2-node spacing (${distLeft} vs ${distRight})`
+  );
+  assert.ok(
+    Math.abs(noyau.cx - layout.width / 2) <= 6,
+    `Expected single center-ish node aligned near center (${noyau.cx} vs ${layout.width / 2})`
+  );
+});
+

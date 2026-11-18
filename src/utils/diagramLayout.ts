@@ -332,16 +332,30 @@ export function computeDiagramLayout(params: {
       if (curr.cx < minLeft) curr.cx = minLeft;
     }
 
-    // Re-center row if single node was very close to center (44..56% originally)
+    // Align single-node rows near center and symmetrically distribute 2-node ungrouped rows
     if (row.length === 1) {
       const orig = rawNodeById.get(row[0].id);
-      if (orig && orig.x >= 44 && orig.x <= 56) {
+      if (orig && orig.x >= 34 && orig.x <= 66) {
         row[0].cx = clamp(
           leftMargin + usableW / 2,
           leftMargin + row[0].boxW / 2,
           width - rightMargin - row[0].boxW / 2
         );
       }
+    } else if (row.length === 2 && !row[0].groupId && !row[1].groupId) {
+      const gap = pairGap(row[0], row[1]);
+      const leftCenter = clamp(
+        leftMargin + usableW * 0.28,
+        leftMargin + row[0].boxW / 2,
+        width - rightMargin - row[1].boxW - gap - row[0].boxW / 2
+      );
+      const rightCenter = clamp(
+        leftMargin + usableW * 0.72,
+        leftCenter + row[0].boxW / 2 + gap + row[1].boxW / 2,
+        width - rightMargin - row[1].boxW / 2
+      );
+      row[0].cx = leftCenter;
+      row[1].cx = rightCenter;
     }
   }
 
@@ -393,14 +407,14 @@ export function computeDiagramLayout(params: {
       const minRowGap = hasLabeledVerticalEdge
         ? hasCrossBranchEdge
           ? hasGroupStartHere
+            ? 27
+            : 30
+          : hasGroupStartHere
             ? 26
             : 28
-          : hasGroupStartHere
-            ? 23
-            : 23
         : hasCrossBranchEdge
           ? 18
-          : 13;
+          : 14;
       currentTopY += minRowGap + groupHeaderSpace;
     }
 

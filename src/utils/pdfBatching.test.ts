@@ -46,9 +46,10 @@ test('splitPdfBufferIntoPageBatches falls back gracefully on non-standard binary
 
 test('computeTargetCardCount scales cards proportionally to pages & extracted facts in auto mode', () => {
   assert.equal(computeTargetCardCount(2, 14, 'auto'), 1);
-  assert.equal(computeTargetCardCount(6, 28, 'auto'), 2);
-  assert.equal(computeTargetCardCount(14, 55, 'auto'), 3);
-  assert.equal(computeTargetCardCount(28, 90, 'auto'), 4);
+  assert.equal(computeTargetCardCount(6, 28, 'auto'), 1);
+  assert.equal(computeTargetCardCount(8, 42, 'auto'), 2);
+  assert.equal(computeTargetCardCount(14, 72, 'auto'), 3);
+  assert.equal(computeTargetCardCount(22, 110, 'auto'), 4);
   assert.equal(computeTargetCardCount(28, 90, '2'), 2);
 });
 

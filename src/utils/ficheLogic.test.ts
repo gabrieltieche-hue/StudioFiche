@@ -416,3 +416,37 @@ test('computeAutoSideTypography boosts sparse side font & spacing toward full-pa
     `Expected auto utilization between 88% and 98%, got ${auto.estimatedUtilizationPercent}%`
   );
 });
+
+test('computeAutoSideTypography keeps comfortable lineHeight >= 1.32 and spacing even on dense sides', () => {
+  const denseSide = {
+    sections: [
+      {
+        id: 's1',
+        romanNumeral: 'I.',
+        title: 'Synthèse dense',
+        blocks: [
+          {
+            id: 'b1',
+            type: 'bulletList' as const,
+            items: Array.from({ length: 12 }, (_, idx) => ({
+              id: `item-${idx}`,
+              level: 1 as const,
+              spans: [
+                {
+                  text: `Notion clé n°${idx + 1} : explication synthétique précise avec un exemple concret et une référence littéraire ou historique importante.`,
+                  tone: 'normal' as const,
+                },
+              ],
+            })),
+          },
+        ],
+      },
+    ],
+  };
+
+  const auto = computeAutoSideTypography(denseSide, 9.2, 1.38, 'recto');
+  assert.ok(auto.lineHeight >= 1.32, `Expected lineHeight >= 1.32, got ${auto.lineHeight}`);
+  assert.ok(auto.bulletGapPx >= 5, `Expected bulletGapPx >= 5, got ${auto.bulletGapPx}`);
+  assert.ok(auto.blockGapPx >= 6, `Expected blockGapPx >= 6, got ${auto.blockGapPx}`);
+});
+

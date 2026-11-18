@@ -44,9 +44,9 @@ const NODE_TONES: Record<
     groupText: '#7F1D1D',
   },
   slate: {
-    fill: '#334155',
-    stroke: '#1E293B',
-    text: '#FFFFFF',
+    fill: '#E2E8F0',
+    stroke: '#475569',
+    text: '#0F172A',
     groupFill: '#F8FAFC',
     groupText: '#1E293B',
   },
@@ -62,6 +62,7 @@ export const DiagramRenderer: React.FC<DiagramRendererProps> = ({
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   const arrowSolidId = `fiche-arrow-solid-${uid}`;
   const arrowDashedId = `fiche-arrow-dashed-${uid}`;
+  const shadowId = `fiche-node-shadow-${uid}`;
 
   const clean = sanitizeDiagramData({
     title,
@@ -73,7 +74,7 @@ export const DiagramRenderer: React.FC<DiagramRendererProps> = ({
 
   if (clean.nodes.length === 0) {
     return (
-      <div className="my-1.5 rounded-xl bg-white/38 border border-slate-900/12 p-2 text-center">
+      <div className="my-1.5 rounded-lg bg-white/52 border border-slate-900/14 p-2 text-center shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
         <div className="text-[8.1pt] font-bold text-slate-800">{clean.title}</div>
         {clean.footnote && (
           <div className="mt-0.5 text-[7.2pt] text-slate-700 italic">{clean.footnote}</div>
@@ -90,9 +91,9 @@ export const DiagramRenderer: React.FC<DiagramRendererProps> = ({
   });
 
   return (
-    <div className="my-1.5 rounded-xl bg-white/36 border border-slate-900/12 px-2 py-1">
+    <div className="my-1.5 rounded-lg bg-white/52 border border-slate-900/14 shadow-[0_1px_2px_rgba(15,23,42,0.04)] px-2.5 py-1.5">
       {clean.title && (
-        <div className="text-center text-[8pt] font-bold text-slate-900 mb-0.5 leading-tight">
+        <div className="text-center text-[8pt] font-bold text-slate-900 pb-1 mb-1 border-b border-slate-900/[0.08] leading-tight tracking-[0.01em]">
           {clean.title}
         </div>
       )}
@@ -103,6 +104,9 @@ export const DiagramRenderer: React.FC<DiagramRendererProps> = ({
         aria-label={clean.title || 'Schéma bilan'}
       >
         <defs>
+          <filter id={shadowId} x="-5%" y="-8%" width="110%" height="120%">
+            <feDropShadow dx="0" dy="1" stdDeviation="1" floodColor="#0F172A" floodOpacity="0.07" />
+          </filter>
           <marker
             id={arrowSolidId}
             viewBox="0 0 10 10"
@@ -229,11 +233,12 @@ export const DiagramRenderer: React.FC<DiagramRendererProps> = ({
                 y={node.top}
                 width={node.boxW}
                 height={node.boxH}
-                rx="5.5"
+                rx="7"
                 fill={tone.fill}
-                fillOpacity="0.92"
+                fillOpacity="0.94"
                 stroke={tone.stroke}
-                strokeWidth="1.25"
+                strokeWidth="1.05"
+                filter={`url(#${shadowId})`}
               />
               {node.labelLines.map((line, lIdx) => (
                 <text
@@ -261,7 +266,7 @@ export const DiagramRenderer: React.FC<DiagramRendererProps> = ({
                   textAnchor="middle"
                   fontSize="7.4"
                   fontWeight="500"
-                  fill={node.tone === 'slate' ? '#E2E8F0' : '#334155'}
+                  fill="#334155"
                 >
                   {line}
                 </text>

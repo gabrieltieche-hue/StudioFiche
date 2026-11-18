@@ -108,10 +108,11 @@ export function computeTargetCardCount(
   const safePages = Math.max(1, totalPages);
   const safeFacts = Math.max(0, totalExtractedFacts);
 
-  // One airy 14x19cm Recto/Verso fiche holds ~18-22 synthesized facts/notions cleanly (82-91% fill).
-  const byFacts = Math.ceil(safeFacts / 20);
+  // One balanced 14x19cm Recto/Verso fiche comfortably holds ~32–36 synthesized facts/notions across both sides.
+  // Avoid splitting short/medium chapters into half-empty cards.
+  const byFacts = Math.ceil(safeFacts / 34);
   const byPages =
-    safePages >= 18 ? 4 : safePages >= 11 ? 3 : safePages >= 5 ? 2 : 1;
+    safePages >= 20 ? 4 : safePages >= 13 ? 3 : safePages >= 7 ? 2 : 1;
 
   return Math.max(1, Math.min(4, Math.max(byFacts, byPages)));
 }
